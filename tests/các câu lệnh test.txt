@@ -1,0 +1,6 @@
+python -m pytest tests/step6/test_policy_reverse.py
+python -m pytest tests/step6/test_policy_emergency.py
+python -m pytest tests/step6/test_policy_noop.py
+python -m pytest tests/step6/test_position_projector.py
+python -m pytest tests/step6/test_policy_engine.py
+

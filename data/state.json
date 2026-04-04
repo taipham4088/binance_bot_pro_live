@@ -1,0 +1,47 @@
+{
+  "account": {
+    "balances": {
+      "FDUSD": 0.0,
+      "BFUSD": 0.0,
+      "BNB": 0.0,
+      "ETH": 0.0,
+      "BTC": 0.01,
+      "USDT": 4985.97065591,
+      "USDC": 5000.0
+    },
+    "available": {
+      "FDUSD": 0.0,
+      "BFUSD": 0.0,
+      "BNB": 0.0,
+      "ETH": 0.0,
+      "BTC": 0.01,
+      "USDT": 4540.92565591,
+      "USDC": 5000.0
+    },
+    "last_update": 1769235883.025304
+  },
+  "positions": {
+    "BTCUSDT:SHORT": {
+      "symbol": "BTCUSDT",
+      "side": "SHORT",
+      "size": 0.1,
+      "entry_price": 89657.6,
+      "unrealized_pnl": 3.46,
+      "leverage": 0.0,
+      "last_update": 1769235883.0273216
+    }
+  },
+  "orders": {
+    "11909917169": {
+      "order_id": "11909917169",
+      "client_id": "web_dvFWAR3hCApxeyH9yV9s",
+      "symbol": "BTCUSDT",
+      "side": "SELL",
+      "status": "NEW",
+      "price": null,
+      "qty": 0.2,
+      "filled": 0.0,
+      "last_update": 1769235901.6360586
+    }
+  }
+}

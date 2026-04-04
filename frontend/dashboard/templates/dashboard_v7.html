@@ -1,0 +1,469 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+
+<meta charset="UTF-8">
+<title>BOT PRO LIVE</title>
+
+<link rel="stylesheet" href="/dashboard/css/dashboard_v6.css">
+
+<link href="https://cdn.jsdelivr.net/npm/gridstack@8.4.0/dist/gridstack.min.css" rel="stylesheet"/>
+
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/gridstack@8.4.0/dist/gridstack-all.js"></script>
+
+<script src="/dashboard/js/dashboard_v6.js?v=2" defer></script>
+
+</head>
+
+<body>
+
+<header class="header">
+
+<h1>BOT PRO LIVE</h1>
+
+<div class="header-buttons">
+
+<button onclick="openPanelManager()">Panels</button>
+<button onclick="resetLayout()">Reset Layout</button>
+
+</div>
+
+<div class="market-header">
+
+<span id="mh-symbol">BTCUSDT</span> |
+<span id="mh-exchange">BINANCE</span> |
+<span id="mh-mode">SHADOW</span>
+
+<br>
+
+<span id="mh-price"></span> |
+<span id="mh-change"></span> |
+<span id="mh-funding"></span>
+
+<br>
+
+<span id="mh-latency"></span> |
+<span id="mh-cpu"></span> |
+<span id="mh-mem"></span> |
+<span id="mh-uptime"></span>
+
+</div>
+
+</header>
+
+<div class="grid-stack">
+
+<!-- POSITION -->
+
+<div class="grid-stack-item" gs-id="position" gs-x="0" gs-y="0" gs-w="3" gs-h="2">
+<div class="grid-stack-item-content">
+<div class="card">
+<div class="card-header">
+<h2>POSITION</h2>
+<div class="panel-menu" onclick="togglePanel('position')">⋮</div>
+</div>
+<div id="position"></div>
+</div>
+</div>
+</div>
+
+<!-- EXECUTION -->
+
+<div class="grid-stack-item" gs-id="execution" gs-x="3" gs-y="0" gs-w="3" gs-h="2">
+<div class="grid-stack-item-content">
+<div class="card">
+<div class="card-header">
+<h2>EXECUTION</h2>
+<div class="panel-menu" onclick="togglePanel('execution')">⋮</div>
+</div>
+<div id="execution"></div>
+</div>
+</div>
+</div>
+
+<!-- STRATEGY -->
+
+<div class="grid-stack-item" gs-id="strategy" gs-x="6" gs-y="0" gs-w="3" gs-h="2">
+<div class="grid-stack-item-content">
+<div class="card">
+<div class="card-header">
+<h2>STRATEGY SIGNAL</h2>
+<div class="panel-menu" onclick="togglePanel('strategy')">⋮</div>
+</div>
+<div id="strategy"></div>
+</div>
+</div>
+</div>
+
+<!-- MARKET BIAS -->
+
+<div class="grid-stack-item" gs-id="market_bias" gs-x="9" gs-y="0" gs-w="3" gs-h="2">
+<div class="grid-stack-item-content">
+<div class="card">
+<div class="card-header">
+<h2>MARKET BIAS</h2>
+<div class="panel-menu" onclick="togglePanel('market_bias')">⋮</div>
+</div>
+<div id="market_bias"></div>
+</div>
+</div>
+</div>
+
+<!-- PNL -->
+
+<div class="grid-stack-item" gs-id="pnl" gs-x="0" gs-y="2" gs-w="3" gs-h="2">
+<div class="grid-stack-item-content">
+<div class="card">
+<div class="card-header">
+<h2>PNL</h2>
+<div class="panel-menu" onclick="togglePanel('pnl')">⋮</div>
+</div>
+<div id="pnl"></div>
+</div>
+</div>
+</div>
+
+<!-- RISK -->
+
+<div class="grid-stack-item" gs-id="risk" gs-x="3" gs-y="2" gs-w="3" gs-h="2">
+<div class="grid-stack-item-content">
+<div class="card">
+<div class="card-header">
+<h2>RISK ENGINE</h2>
+<div class="panel-menu" onclick="togglePanel('risk')">⋮</div>
+</div>
+<div id="risk"></div>
+</div>
+</div>
+</div>
+
+<!-- CONTROL PANEL -->
+
+<div class="grid-stack-item" gs-id="control" gs-x="6" gs-y="2" gs-w="3" gs-h="2">
+
+<div class="grid-stack-item-content">
+
+<div class="card">
+
+<div class="card-header">
+
+<h2>CONTROL PANEL</h2>
+
+<div class="control-actions">
+<button onclick="pauseBot()">Pause</button>
+<button onclick="resumeBot()">Resume</button>
+</div>
+
+<div class="panel-menu" onclick="togglePanel('control')">⋮</div>
+
+</div>
+
+
+<div class="control-panel">
+
+<div class="control-filter">
+<input id="symbol_filter"
+type="text"
+placeholder="Filter symbol..."
+onkeyup="filterSymbols()">
+</div>
+
+<div class="control-row">
+
+<label>Symbol</label>
+
+<select id="symbol_select"></select>
+
+<button onclick="setSymbol()">Apply</button>
+
+</div>
+
+<div class="control-row">
+
+<label>Exchange</label>
+
+<select id="exchange_select">
+<option value="binance">BINANCE</option>
+<option value="bybit">BYBIT</option>
+<option value="okx">OKX</option>
+<option value="paper">PAPER</option>
+</select>
+
+<button onclick="setExchange()">Apply</button>
+
+</div>
+
+<div class="control-row">
+
+<label>Risk</label>
+
+<input 
+id="risk_input"
+type="number"
+value="1"
+step="0.1"
+>
+
+<button onclick="setRisk()">Apply</button>
+
+</div>
+
+
+<div class="control-row">
+
+<label>Trade Mode</label>
+
+<select id="trade_mode_select">
+<option value="both">BOTH</option>
+<option value="long">LONG</option>
+<option value="short">SHORT</option>
+</select>
+
+<button onclick="setMode()">Apply</button>
+
+</div>
+
+
+<div class="control-row">
+
+<label>Trading Mode</label>
+
+<select id="trading_mode_select">
+<option value="backtest">BACKTEST</option>
+<option value="paper">PAPER</option>
+<option value="shadow">SHADOW</option>
+<option value="live">LIVE</option>
+</select>
+
+<button onclick="setTradingMode()">Apply</button>
+
+</div>
+
+
+<div class="control-row">
+
+<label>Strategy</label>
+
+<select id="strategy_select">
+<option value="trend">TREND</option>
+<option value="range">RANGE</option>
+<option value="momentum">MOMENTUM</option>
+</select>
+
+<button onclick="setStrategy()">Apply</button>
+
+</div>
+
+</div>
+
+</div>
+
+</div>
+
+</div>
+
+<!-- SYSTEM HEALTH -->
+
+<div class="grid-stack-item" gs-id="system" gs-x="9" gs-y="2" gs-w="3" gs-h="2">
+<div class="grid-stack-item-content">
+<div class="card">
+<div class="card-header">
+<h2>SYSTEM HEALTH</h2>
+<div class="panel-menu" onclick="togglePanel('system')">⋮</div>
+</div>
+<div id="system"></div>
+</div>
+</div>
+</div>
+
+<!-- EXECUTION PIPELINE -->
+
+<div class="grid-stack-item" gs-id="pipeline" gs-x="0" gs-y="4" gs-w="12" gs-h="2">
+<div class="grid-stack-item-content">
+<div class="card">
+<div class="card-header">
+<h2>EXECUTION PIPELINE</h2>
+<div class="panel-menu" onclick="togglePanel('pipeline')">⋮</div>
+</div>
+<div id="execution_pipeline"></div>
+</div>
+</div>
+</div>
+
+<!-- ORDER LIFECYCLE -->
+
+<div class="grid-stack-item" gs-id="lifecycle" gs-x="0" gs-y="5" gs-w="12" gs-h="2">
+<div class="grid-stack-item-content">
+<div class="card">
+<div class="card-header">
+<h2>ORDER LIFECYCLE</h2>
+<div class="panel-menu" onclick="togglePanel('lifecycle')">⋮</div>
+</div>
+<div id="order_lifecycle"></div>
+</div>
+</div>
+</div>
+
+<!-- LATENCY -->
+
+<div class="grid-stack-item" gs-id="latency" gs-x="0" gs-y="8" gs-w="4" gs-h="2">
+<div class="grid-stack-item-content">
+<div class="card">
+<div class="card-header">
+<h2>LATENCY</h2>
+<div class="panel-menu" onclick="togglePanel('latency')">⋮</div>
+</div>
+<div id="latency"></div>
+</div>
+</div>
+</div>
+
+<!-- SLIPPAGE -->
+
+<div class="grid-stack-item" gs-id="slippage" gs-x="4" gs-y="8" gs-w="4" gs-h="2">
+<div class="grid-stack-item-content">
+<div class="card">
+<div class="card-header">
+<h2>SLIPPAGE</h2>
+<div class="panel-menu" onclick="togglePanel('slippage')">⋮</div>
+</div>
+<div id="slippage"></div>
+</div>
+</div>
+</div>
+
+<!-- ALERTS -->
+
+<div class="grid-stack-item" gs-id="alerts" gs-x="8" gs-y="8" gs-w="4" gs-h="2">
+<div class="grid-stack-item-content">
+<div class="card">
+<div class="card-header">
+<h2>ALERTS</h2>
+<div class="panel-menu" onclick="togglePanel('alerts')">⋮</div>
+</div>
+<div id="alerts"></div>
+</div>
+</div>
+</div>
+
+<!-- EQUITY -->
+
+<div class="grid-stack-item" gs-id="equity" gs-x="0" gs-y="10" gs-w="8" gs-h="4">
+<div class="grid-stack-item-content">
+<div class="card">
+<div class="card-header">
+<h2>EQUITY CURVE</h2>
+<div class="panel-menu" onclick="togglePanel('equity')">⋮</div>
+</div>
+<canvas id="equityChart"></canvas>
+</div>
+</div>
+</div>
+
+<!-- TRADE HISTORY -->
+
+<div class="grid-stack-item" gs-id="trades" gs-x="8" gs-y="10" gs-w="4" gs-h="4">
+<div class="grid-stack-item-content">
+<div class="card">
+<div class="card-header">
+<h2>TRADE HISTORY</h2>
+<div class="panel-menu" onclick="togglePanel('trades')">⋮</div>
+</div>
+
+<div class="table-scroll">
+<table id="trades">
+
+<thead>
+<tr>
+
+<th>Time</th>
+<th>Mode</th>
+<th>Symbol</th>
+<th>Strategy</th>
+<th>Side</th>
+<th>Size</th>
+<th>Entry</th>
+<th>Exit</th>
+<th>PnL</th>
+<th>Fees</th>
+<th>Asset</th>
+
+</tr>
+</thead>
+
+<tbody></tbody>
+
+</table>
+</div>
+
+</div>
+</div>
+</div>
+
+<!-- EXECUTION HISTORY -->
+
+<div class="grid-stack-item" gs-id="execution_history" gs-x="0" gs-y="13" gs-w="12" gs-h="4">
+
+<div class="grid-stack-item-content">
+
+<div class="card">
+
+<div class="card-header">
+
+<h2>EXECUTION HISTORY</h2>
+
+<div class="panel-menu" onclick="togglePanel('execution_history')">⋮</div>
+
+</div>
+
+<div class="table-scroll">
+<table id="execution_history_table">
+
+<thead>
+<tr>
+
+<th>Time</th>
+<th>Mode</th>
+<th>Symbol</th>
+<th>Strategy</th>
+<th>Side</th>
+<th>Size</th>
+<th>Fill</th>
+<th>Fee</th>
+<th>Slippage</th>
+<th>Latency</th>
+
+</tr>
+</thead>
+
+<tbody></tbody>
+
+</table>
+</div>
+
+</div>
+
+</div>
+
+</div>
+
+</div>
+<div id="panelManager" class="panel-manager">
+
+<div class="panel-manager-box">
+
+<h3>Panel Manager</h3>
+
+<div id="panelList"></div>
+
+<button onclick="closePanelManager()">Close</button>
+
+</div>
+
+</div>
+
+</body>
+
+</html>

@@ -1,0 +1,50 @@
+.dashboard {
+  font-family: system-ui, sans-serif;
+  padding: 12px;
+}
+
+.header {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid #ddd;
+  margin-bottom: 12px;
+}
+
+.main {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+
+.panel {
+  border: 1px solid #ddd;
+  border-radius: 6px;
+  padding: 8px;
+  background: #fafafa;
+}
+
+.section {
+  margin-top: 12px;
+}
+
+h3 {
+  margin: 0 0 6px 0;
+  font-size: 14px;
+}
+
+/* === Health visual priority === */
+.health-critical {
+  border: 2px solid #d32f2f;
+  background: rgba(211, 47, 47, 0.06);
+}
+
+.health-warn {
+  border: 2px solid #f57c00;
+  background: rgba(245, 124, 0, 0.06);
+}
+
+.health-ok {
+  border: 1px solid #ddd;
+}
