@@ -603,6 +603,14 @@ overflow-y:auto;
 overflow-x:hidden;
 }
 
+/* Sticky header: Trade + Execution history (.table-scroll already overflow-y:auto) */
+.history-table thead th{
+position:sticky;
+top:0;
+z-index:2;
+background:#1f2937;
+}
+
 #trades,
 #execution_history_table{
 width:100%;

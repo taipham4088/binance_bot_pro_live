@@ -93,6 +93,7 @@ def execution_history(mode: str | None = None):
         side,
         size,
         fill_price,
+        fee,
         slippage,
         latency
         FROM execution_history
@@ -108,6 +109,7 @@ def execution_history(mode: str | None = None):
 
         for r in rows:
 
+            lat = r[9]
             history.append({
                 "time": int(r[0] / 1000),
                 "mode": r[1],
@@ -116,8 +118,9 @@ def execution_history(mode: str | None = None):
                 "side": r[4],
                 "size": r[5],
                 "fill_price": r[6],
-                "slippage": r[7],
-                "latency": round(r[8], 2) if r[8] else 0
+                "fee": r[7],
+                "slippage": r[8],
+                "latency": round(lat, 2) if lat is not None else 0
             })
 
         return {

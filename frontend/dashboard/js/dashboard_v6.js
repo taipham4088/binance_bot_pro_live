@@ -482,7 +482,7 @@ const size = t.size ?? "-"
 const entry = t.entry ?? "-"
 const exit = t.exit ?? "-"
 const pnl = t.pnl ?? 0
-const fees = t.fees ?? 0
+const fees = Number(t.fees ?? t.fee ?? 0).toFixed(3)
 
 const sideColor = side==="LONG" ? "#22c55e" : "#ef4444"
 const pnlColor = pnl>=0 ? "#22c55e" : "#ef4444"
@@ -501,6 +501,7 @@ row.innerHTML=`
 <td>${exit}</td>
 <td style="color:${pnlColor}">${pnl}</td>
 <td>${fees}</td>
+<td>${t.asset || "USDT"}</td>
 
 `
 
@@ -1059,6 +1060,7 @@ row.innerHTML=`
 <td style="color:${sideColor}">${t.side}</td>
 <td>${t.size ?? "-"}</td>
 <td>${t.fill_price ?? "-"}</td>
+<td>${t.fee != null && t.fee !== "" ? t.fee : "-"}</td>
 <td>${t.slippage ?? "-"}</td>
 <td>${t.latency ?? "-"} ms</td>
 

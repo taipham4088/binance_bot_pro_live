@@ -20,6 +20,7 @@ class ExecutionTrace:
     fill_time: Optional[float] = None
 
     fill_price: Optional[float] = None
+    fee: Optional[float] = None
 
     def mark_order_sent(self):
         self.order_sent_time = time.time()
@@ -169,12 +170,21 @@ class ExecutionMonitor:
             return
 
         # 🔥 luôn tạo trace mới cho mỗi execution
+        raw_fee = event.get("fee")
+        fee_val = None
+        if raw_fee is not None:
+            try:
+                fee_val = float(raw_fee)
+            except (TypeError, ValueError):
+                fee_val = None
+
         trace = ExecutionTrace(
             symbol=event["symbol"],
             side=event.get("side"),
             size=event.get("size"),
             signal_price=event.get("signal_price"),
-            signal_time=event.get("signal_time", time.time())
+            signal_time=event.get("signal_time", time.time()),
+            fee=fee_val,
         )
         self.last_trace = trace
         # update optional timestamps
@@ -249,6 +259,7 @@ class ExecutionMonitor:
 
             "signal_price": signal_price,
             "fill_price": t.fill_price,
+            "fee": t.fee,
 
             "slippage": slippage,
 

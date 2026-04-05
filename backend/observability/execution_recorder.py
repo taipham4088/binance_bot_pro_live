@@ -33,11 +33,17 @@ def init_db(mode="shadow"):
 
         signal_price REAL,
         fill_price REAL,
+        fee REAL,
 
         slippage REAL,
         latency REAL
     )
     """)
+
+    cursor.execute("PRAGMA table_info(execution_history)")
+    columns = [c[1] for c in cursor.fetchall()]
+    if "fee" not in columns:
+        cursor.execute("ALTER TABLE execution_history ADD COLUMN fee REAL")
 
     conn.commit()
     conn.close()
@@ -89,6 +95,13 @@ def record_execution(trace, mode="shadow"):
         conn = sqlite3.connect(db_path)
         cursor = conn.cursor()
 
+        fee = trace.get("fee")
+        if fee is not None:
+            try:
+                fee = float(fee)
+            except (TypeError, ValueError):
+                fee = None
+
         cursor.execute("""
         INSERT INTO execution_history (
 
@@ -102,12 +115,13 @@ def record_execution(trace, mode="shadow"):
 
             signal_price,
             fill_price,
+            fee,
 
             slippage,
             latency
 
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
 
             mode,
@@ -120,6 +134,7 @@ def record_execution(trace, mode="shadow"):
 
             trace.get("signal_price"),
             trace.get("fill_price"),
+            fee,
 
             trace.get("slippage"),
             latency
