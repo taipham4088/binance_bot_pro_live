@@ -77,6 +77,7 @@ class BinanceTradeClient:
             sanitized_qty = self.guard.validate_and_sanitize(
                 price=price,
                 quantity=quantity,
+                reduce_only_close=bool(kwargs.get("reduceOnly")),
             )
 
             kwargs["quantity"] = float(sanitized_qty)

@@ -275,20 +275,30 @@ class LiveExecutionSystem:
                 await asyncio.sleep(0.05)
 
                 try:
-                    latest_position = getattr(self.sync_engine.position, "current", None)
+                    latest_position = None
+                    for p in self.sync_engine.position.get_all():
+                        if p.symbol == symbol:
+                            latest_position = p
+                            break
 
                     if latest_position:
                         current_size = abs(float(latest_position.size))
 
-                        if last_size is not None and abs(current_size - last_size) < 0.000001:
+                        if last_size is not None and abs(current_size - last_size) < 1e-12:
                             size = current_size
-                            side = latest_position.side.name
+                            side = str(latest_position.side).upper()
                             break
 
                         last_size = current_size
 
                 except Exception:
                     pass
+
+            for p in self.sync_engine.position.get_all():
+                if p.symbol == symbol:
+                    size = abs(float(p.size))
+                    side = str(p.side).upper()
+                    break
 
             # 🔥 set phase
             self.execution_lock.update_phase(

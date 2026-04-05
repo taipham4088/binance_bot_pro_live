@@ -249,7 +249,8 @@ class BinanceExecutionAdapter(BaseExchangeAdapter):
                     symbol=symbol,
                     side=side,
                     type="MARKET",
-                    quantity=quantity
+                    quantity=quantity,
+                    reduceOnly=True,
                 )
 
                 real_id = response.get("clientOrderId")

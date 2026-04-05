@@ -464,6 +464,19 @@ class SyncEngine:
                             "ts": time.time()
                         })
 
+                        old_pos_ro = None
+                        for p in self.position.get_all():
+                            if p.symbol == symbol:
+                                old_pos_ro = p
+                                break
+                        self._apply_position_net_after_opposite_fill(
+                            symbol=symbol,
+                            order_side=side,
+                            qty=qty,
+                            price=price,
+                            old_pos=old_pos_ro,
+                        )
+
                         return
 
                     key = f"{symbol}-{execution_id}"
@@ -478,18 +491,6 @@ class SyncEngine:
                         if p.symbol == symbol:
                             old_pos = p
                             break
-                    # 🔥 detect reverse / manual close
-                    if old_pos and (
-                        (old_pos.side == "LONG" and side == "SELL") or
-                        (old_pos.side == "SHORT" and side == "BUY")
-                    ):
-                        self.bus.publish(
-                            PositionClosed(
-                                old_pos.symbol,
-                                old_pos.side
-                            )
-                        )
-
                     now = time.time()
                     latency = self._latency_buffer.get(key, {})
                     print("🔥 LATENCY LOOKUP:", key)
@@ -526,32 +527,18 @@ class SyncEngine:
 
                     print("[SYNC] EXECUTION EVENT:", symbol, side, qty, price)
                     from execution.sync.models import PositionState
-                    # 🔥 Detect reduce / close safely (prevent phantom)
-                    manual_reduce = False
-                    manual_close = False
 
-                    if old_pos:
-
-                        opposite = (
-                            (old_pos.side == "LONG" and side == "SELL") or
-                            (old_pos.side == "SHORT" and side == "BUY")
+                    # Opposite-side fill: sync full/partial close or single-fill reverse (not only reduce_only)
+                    if old_pos and self._fill_opposite_to_position(side, old_pos.side):
+                        self._apply_position_net_after_opposite_fill(
+                            symbol=symbol,
+                            order_side=side,
+                            qty=qty,
+                            price=price,
+                            old_pos=old_pos,
                         )
+                        return
 
-                        # full close
-                        if opposite and qty == old_pos.size:
-                            manual_close = True
-                            print("🔥 MANUAL CLOSE DETECTED — skip phantom position")
-
-                        # partial reduce (do NOT skip — let POSITION_UPDATE handle remaining)
-                        elif opposite and qty < old_pos.size:
-                            manual_reduce = True
-                            print("🔥 MANUAL REDUCE DETECTED — allow remaining position")
-
-                        # 🔥 Skip only full close
-                        if manual_close:
-                            return
-
-                    # 🔥 Only apply position if not manual reduce / close / already flat
                     current_pos = None
                     for p in self.position.get_all():
                         if p.symbol == symbol:
@@ -563,7 +550,21 @@ class SyncEngine:
                         current_pos.size == 0
                     )
 
-                    if not manual_reduce and not manual_close and not already_flat:
+                    min_s = self._get_symbol_min_size(symbol)
+                    if already_flat and qty > min_s * 0.5:
+                        op = PositionState(
+                            symbol=symbol,
+                            side="LONG" if side == "BUY" else "SHORT",
+                            size=qty,
+                            entry_price=price,
+                            unrealized_pnl=0,
+                            leverage=0,
+                            last_update=time.time()
+                        )
+                        status, pos = self.position.apply_event(op)
+                        if status == "UPDATED":
+                            self.bus.publish(PositionUpdated(pos))
+                    elif not already_flat:
 
                         p = PositionState(
                             symbol=symbol,
@@ -617,6 +618,120 @@ class SyncEngine:
             pass
 
         return 0.001
+
+    def _fill_opposite_to_position(self, order_side: str, pos_side: str) -> bool:
+        """True if this order side reduces/closes the given position side (one-way futures)."""
+        return (pos_side == "LONG" and order_side == "SELL") or (
+            pos_side == "SHORT" and order_side == "BUY"
+        )
+
+    def _apply_position_net_after_opposite_fill(
+        self,
+        *,
+        symbol: str,
+        order_side: str,
+        qty: float,
+        price: float,
+        old_pos,
+    ) -> None:
+        """
+        Update PositionEngine after a fill on the side that closes/reduces current exposure.
+        Handles full close, partial reduce, and single-fill reverse (qty > old size → net flip).
+        """
+        from execution.sync.models import PositionState
+
+        if not old_pos:
+            return
+
+        min_sz = self._get_symbol_min_size(symbol)
+        eps = max(min_sz * 0.01, 1e-12)
+
+        if not self._fill_opposite_to_position(order_side, old_pos.side):
+            return
+
+        osz = float(old_pos.size)
+
+        # Single fill closes old and opens opposite (e.g. SHORT 0.045 + BUY 0.055 → LONG 0.01)
+        if qty > osz + eps:
+            net = qty - osz
+            new_side = "LONG" if order_side == "BUY" else "SHORT"
+            z = PositionState(
+                symbol=symbol,
+                side=old_pos.side,
+                size=0.0,
+                entry_price=float(old_pos.entry_price or 0),
+                unrealized_pnl=0.0,
+                leverage=float(old_pos.leverage or 0),
+                last_update=time.time(),
+            )
+            st, meta = self.position.apply_event(z)
+            if st == "CLOSED" and meta:
+                self.bus.publish(
+                    PositionClosed(meta.get("symbol"), meta.get("side"))
+                )
+            np = PositionState(
+                symbol=symbol,
+                side=new_side,
+                size=net,
+                entry_price=float(price),
+                unrealized_pnl=0.0,
+                leverage=0.0,
+                last_update=time.time(),
+            )
+            st2, pos2 = self.position.apply_event(np)
+            if st2 == "UPDATED":
+                self.bus.publish(PositionUpdated(pos2))
+            return
+
+        # Full close (within tick tolerance)
+        if abs(qty - osz) <= max(eps, osz * 1e-9):
+            z = PositionState(
+                symbol=symbol,
+                side=old_pos.side,
+                size=0.0,
+                entry_price=float(old_pos.entry_price or 0),
+                unrealized_pnl=0.0,
+                leverage=float(old_pos.leverage or 0),
+                last_update=time.time(),
+            )
+            st, meta = self.position.apply_event(z)
+            if st == "CLOSED" and meta:
+                self.bus.publish(
+                    PositionClosed(meta.get("symbol"), meta.get("side"))
+                )
+            return
+
+        # Partial reduce only
+        new_sz = max(0.0, osz - qty)
+        if new_sz <= min_sz * 0.5:
+            z = PositionState(
+                symbol=symbol,
+                side=old_pos.side,
+                size=0.0,
+                entry_price=float(old_pos.entry_price or 0),
+                unrealized_pnl=0.0,
+                leverage=float(old_pos.leverage or 0),
+                last_update=time.time(),
+            )
+            st, meta = self.position.apply_event(z)
+            if st == "CLOSED" and meta:
+                self.bus.publish(
+                    PositionClosed(meta.get("symbol"), meta.get("side"))
+                )
+            return
+
+        rp = PositionState(
+            symbol=symbol,
+            side=old_pos.side,
+            size=new_sz,
+            entry_price=None,
+            unrealized_pnl=0.0,
+            leverage=float(old_pos.leverage or 0),
+            last_update=time.time(),
+        )
+        st, pos = self.position.apply_event(rp)
+        if st == "UPDATED":
+            self.bus.publish(PositionUpdated(pos))
     
     def get_last_update_ts(self):
         return self.last_update_ts

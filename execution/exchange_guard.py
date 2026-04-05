@@ -1,6 +1,6 @@
 # execution/exchange_guard.py
 
-from decimal import Decimal, ROUND_DOWN
+from decimal import Decimal, ROUND_DOWN, ROUND_UP
 
 
 class ExchangeValidationError(Exception):
@@ -36,16 +36,20 @@ class ExchangeGuard:
     # PUBLIC ENTRY
     # -----------------------------------------------------
 
-    def validate_and_sanitize(self, price: float, quantity: float):
+    def validate_and_sanitize(self, price: float, quantity: float, *, reduce_only_close: bool = False):
         """
         Returns sanitized_quantity (Decimal)
         Raises ExchangeValidationError if invalid
+
+        Opens / increases: round DOWN to lot step (exchange-safe).
+        reduce_only_close: round UP to lot step so full position can close (no dust from floor).
         """
 
         price = Decimal(str(price))
         quantity = Decimal(str(quantity))
 
-        quantity = self._apply_step_rounding(quantity)
+        rounding = ROUND_UP if reduce_only_close else ROUND_DOWN
+        quantity = self._apply_step_rounding(quantity, rounding)
         self._validate_qty_bounds(quantity)
         self._validate_notional(price, quantity)
 
@@ -55,16 +59,13 @@ class ExchangeGuard:
     # INTERNAL VALIDATIONS
     # -----------------------------------------------------
 
-    def _apply_step_rounding(self, quantity: Decimal) -> Decimal:
-        """
-        Round DOWN to nearest step size.
-        Exchange requires flooring.
-        """
-        steps = (quantity / self.step_size).to_integral_value(rounding=ROUND_DOWN)
+    def _apply_step_rounding(self, quantity: Decimal, rounding) -> Decimal:
+        """Round quantity to lot step (DOWN for opens, UP for reduce-only full close)."""
+        steps = (quantity / self.step_size).to_integral_value(rounding=rounding)
         rounded = steps * self.step_size
         return rounded.quantize(
             Decimal(10) ** -self.qty_precision,
-            rounding=ROUND_DOWN,
+            rounding=rounding,
         )
 
     def _validate_qty_bounds(self, quantity: Decimal):
