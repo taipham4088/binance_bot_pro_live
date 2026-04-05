@@ -40,7 +40,9 @@ class StubExecution(BaseExecution):
 
         IMPORTANT:
         - MUST NOT go through execute()
-        - MUST emit analytics via same path
+        - Emit EXECUTION + POSITION_CLOSE for telemetry / journal sync.
+        - Do not publish TRADE here: fill-driven closes come from ORDER_TRADE_UPDATE
+          (authoritative); a TRADE after POSITION_CLOSE caused ghost OPEN + duplicate CLOSE.
         """
 
         size = float(size or 0)
@@ -104,20 +106,6 @@ class StubExecution(BaseExecution):
             })
         except Exception as e:
             print("⚠ ANALYTICS BUS ERROR (external close):", e)
-
-
-        # 🔥 ADD TRADE EVENT (QUAN TRỌNG)
-        try:
-            analytics_bus.publish("TRADE", {
-                "symbol": symbol,
-                "side": normalized_side,
-                "price": price,
-                "size": size,
-                "pnl": 0,
-                "ts": time.time()
-            })
-        except Exception as e:
-            print("⚠ TRADE EVENT ERROR (external):", e)
 
         return event
 

@@ -423,7 +423,10 @@ class SyncEngine:
                     self._fee_buffer.setdefault(execution_id, 0)
                     self._fee_buffer[execution_id] += fee
 
-                    reduce_only = o.get("R", False)
+                    r_flag = o.get("R", False)
+                    reduce_only = r_flag is True or (
+                        isinstance(r_flag, str) and r_flag.lower() in ("true", "1")
+                    )
 
                     if reduce_only:
                         print("[SYNC] REDUCE ONLY CLOSE:", symbol, side, qty)

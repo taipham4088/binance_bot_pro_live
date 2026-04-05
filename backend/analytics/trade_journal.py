@@ -10,6 +10,9 @@ class TradeJournal:
     _restore_done = False
     """
     TradeJournal lưu toàn bộ vòng đời trade.
+
+    Close ingestion: POSITION_CLOSE (handle_event) and TRADE (handle_trade).
+    EXECUTION is not handled here — analytics_bus sends it to ExecutionMonitor only.
     """
 
     def __init__(self, mode="shadow"):
@@ -37,7 +40,7 @@ class TradeJournal:
 
         elif event_type == "POSITION_CLOSE":
 
-            self.on_position_close(
+            self._apply_close_if_open(
                 price=data["price"],
                 size=data["size"],
                 fee=data.get("fee", 0)
@@ -57,8 +60,9 @@ class TradeJournal:
         if not side or not price or not size:
             return
 
-        # nếu CLOSE mà không có trade → ignore
-        if execution_type == "CLOSE" and self.current_trade is None:
+        # CLOSE before OPEN-on-None so late ORDER_TRADE_UPDATE can restore from open_trade.json
+        if execution_type == "CLOSE":
+            self._apply_close_if_open(price, size, fee)
             return
 
         # nếu chưa có trade → open
@@ -66,15 +70,6 @@ class TradeJournal:
             self.on_position_open(
                 symbol=data.get("symbol"),
                 side=side,
-                price=price,
-                size=size,
-                fee=fee
-            )
-            return
-
-        # execution close priority
-        if execution_type == "CLOSE":
-            self.on_position_close(
                 price=price,
                 size=size,
                 fee=fee
@@ -90,7 +85,7 @@ class TradeJournal:
             # Case 1 — Full close
             if incoming_size == current_size:
 
-                self.on_position_close(
+                self._apply_close_if_open(
                     price=price,
                     size=current_size,
                     fee=fee
@@ -101,7 +96,7 @@ class TradeJournal:
             elif incoming_size > current_size:
 
                 # close current
-                self.on_position_close(
+                self._apply_close_if_open(
                     price=price,
                     size=current_size,
                     fee=fee
@@ -124,7 +119,7 @@ class TradeJournal:
             else:
 
                 # close partial
-                self.on_position_close(
+                self._apply_close_if_open(
                     price=price,
                     size=incoming_size,
                     fee=fee
@@ -133,6 +128,15 @@ class TradeJournal:
                 # keep remaining
   
                 return
+
+    def _apply_close_if_open(self, price, size, fee=0) -> None:
+        """Close only if a position is open; ignore duplicate CLOSE (e.g. account + order path)."""
+        if self.current_trade is None:
+            self._restore_current_trade(force=True)
+        if self.current_trade is None:
+            return
+        self.on_position_close(price, size, fee)
+
     def _get_open_trade_path(self):
         folder = os.path.dirname(self.db_path)
         return os.path.join(folder, "open_trade.json")
@@ -153,10 +157,9 @@ class TradeJournal:
             print("Persist open trade error:", e)
 
 
-    def _restore_current_trade(self):
+    def _restore_current_trade(self, force=False):
 
-        # restore only once
-        if TradeJournal._restore_done:
+        if not force and TradeJournal._restore_done:
             return
 
         try:
@@ -168,9 +171,9 @@ class TradeJournal:
             with open(path, "r") as f:
                 self.current_trade = json.load(f)
 
-            TradeJournal._restore_done = True
-
-            print("♻ RESTORE OPEN TRADE:", self.current_trade)
+            if not TradeJournal._restore_done:
+                TradeJournal._restore_done = True
+                print("♻ RESTORE OPEN TRADE:", self.current_trade)
 
         except Exception as e:
             print("Restore open trade error:", e)
@@ -257,8 +260,7 @@ class TradeJournal:
 
     def on_position_close(self, price, size, fee=0):
 
-        if not self.current_trade:
-            print("⚠ NO CURRENT TRADE → IGNORE CLOSE")
+        if self.current_trade is None:
             return
 
         entry_price = self.current_trade["entry_price"]
