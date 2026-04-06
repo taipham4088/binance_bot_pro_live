@@ -216,23 +216,6 @@ class SyncEngine:
                 
                 # 🔥 Reverse detect
                 manual_reverse = False
-
-                #if old_pos and old_pos.size > 0:
-
-                 #   reverse = (
-                  #      (old_pos.side == "LONG" and side == "SHORT") or
-                   #     (old_pos.side == "SHORT" and side == "LONG")
-                    #)
-
-                    #if reverse:
-                     #   manual_reverse = True
-                    # mark expected reverse
-                    #if reverse:
-                     #   self._expected_reverse[symbol] = {
-                      #      "side": side,
-                       #     "ts": time.time()
-                        #}
-
                 manual_open = False
                 # 🔥 reverse expected skip
                 expected = self._expected_reverse.get(symbol)
@@ -322,6 +305,9 @@ class SyncEngine:
                 if size == 0:
                     self._manual_open_flag[symbol] = False
                     self._pending_manual_close.pop(symbol, None)
+                # 🔥 Force close when exchange reports flat
+                if size == 0 and old_pos:
+                    side = old_pos.side
 
                 from execution.sync.models import PositionState
 
@@ -461,7 +447,9 @@ class SyncEngine:
                             "fee": total_fee,              
                             "fee_asset": fee_asset, 
                             "pnl": float(o.get("rp", 0)),
-                            "ts": time.time()
+                            "ts": time.time(),
+                            "client_order_id": execution_id,
+                            "order_id": str(o.get("i")) if o.get("i") is not None else None,
                         })
 
                         old_pos_ro = None
@@ -475,6 +463,7 @@ class SyncEngine:
                             qty=qty,
                             price=price,
                             old_pos=old_pos_ro,
+                            reduce_only=True,
                         )
 
                         return
@@ -522,7 +511,9 @@ class SyncEngine:
                         "fee": total_fee,
                         "fee_asset": fee_asset,
                         "pnl": 0,
-                        "ts": now
+                        "ts": now,
+                        "client_order_id": execution_id,
+                        "order_id": str(o.get("i")) if o.get("i") is not None else None,
                     })
 
                     print("[SYNC] EXECUTION EVENT:", symbol, side, qty, price)
@@ -633,6 +624,7 @@ class SyncEngine:
         qty: float,
         price: float,
         old_pos,
+        reduce_only: bool = False,
     ) -> None:
         """
         Update PositionEngine after a fill on the side that closes/reduces current exposure.
@@ -653,6 +645,12 @@ class SyncEngine:
 
         # Single fill closes old and opens opposite (e.g. SHORT 0.045 + BUY 0.055 → LONG 0.01)
         if qty > osz + eps:
+            # Reduce-only: exchange never sends a fill larger than the reduced leg in a way
+            # that implies flip vs remainder. If ACCOUNT_UPDATE / POSITION_UPDATE already landed,
+            # osz is post-reduce remainder and qty is the fill — qty > osz is normal (e.g. SHORT
+            # 0.02 left, BUY filled 0.035). Do not treat as reverse.
+            if reduce_only:
+                return
             net = max(0.0, round(qty - osz, 8))
             new_side = "LONG" if order_side == "BUY" else "SHORT"
             z = PositionState(
@@ -703,7 +701,8 @@ class SyncEngine:
 
         # Partial reduce only
         new_sz = max(0.0, round(osz - qty, 8))
-        if new_sz <= min_sz * 0.5:
+        EPS = 1e-8
+        if new_sz < EPS:
             z = PositionState(
                 symbol=symbol,
                 side=old_pos.side,
