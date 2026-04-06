@@ -9,6 +9,9 @@ from backend.storage.mode_storage import mode_storage
 
 class TradeJournal:
     _restore_done = False
+    # Opposite-side: treat near-equal sizes as full close (avoid Case 2 reverse on float drift)
+    REVERSE_FULL_CLOSE_EPS = 1e-6
+    TRADE_SIZE_ROUND_DECIMALS = 8
     """
     TradeJournal lưu toàn bộ vòng đời trade.
 
@@ -196,11 +199,13 @@ class TradeJournal:
             # nếu side khác → reverse / partial reverse
             if side != self.current_trade["side"]:
 
-                current_size = float(self.current_trade["entry_size"])
-                incoming_size = float(size)
+                rd = self.TRADE_SIZE_ROUND_DECIMALS
+                current_size = round(float(self.current_trade["entry_size"]), rd)
+                incoming_size = round(float(size), rd)
+                eps = self.REVERSE_FULL_CLOSE_EPS
 
-                # Case 1 — Full close
-                if incoming_size == current_size:
+                # Case 1 — Full close (exact or float drift, e.g. 0.02 vs 0.019999)
+                if abs(incoming_size - current_size) <= eps:
 
                     self._apply_close_if_open(
                         price=price,
@@ -252,7 +257,7 @@ class TradeJournal:
                     self._clear_current_trade()
 
                     # open remaining
-                    remaining = incoming_size - current_size
+                    remaining = round(incoming_size - current_size, rd)
 
                     self.on_position_open(
                         symbol=data.get("symbol"),
