@@ -34,7 +34,81 @@ class SyncEngine:
         self._pending_manual_close = {}
         # reverse expected guard
         self._expected_reverse = {}
-        
+        # Same-side size drop from ACCOUNT/POSITION before ORDER_TRADE_UPDATE (R may be false on MARKET reduce)
+        self._post_stream_reduce_guard = {}
+        self._post_stream_reduce_guard_ttl = 3.0
+
+    def _position_side_size(self, symbol: str):
+        for p in self.position.get_all():
+            if p.symbol == symbol:
+                return p.side, float(p.size)
+        return None
+
+    def _register_same_side_reduction(
+        self, symbol: str, side: str, old_sz: float, new_sz: float
+    ) -> None:
+        if old_sz <= new_sz + 1e-12:
+            return
+        min_sz = self._get_symbol_min_size(symbol)
+        tol = max(min_sz * 0.001, 1e-10, old_sz * 1e-8)
+        g = self._post_stream_reduce_guard.get(symbol)
+        anchor_old = float(old_sz)
+        if (
+            g
+            and g.get("side") == side
+            and abs(float(g["new_sz"]) - anchor_old) <= tol
+        ):
+            anchor_old = float(g["old_sz"])
+        self._post_stream_reduce_guard[symbol] = {
+            "side": side,
+            "old_sz": anchor_old,
+            "new_sz": float(new_sz),
+            "mono": time.monotonic(),
+        }
+
+    def _prune_stale_reduce_guards(self) -> None:
+        now = time.monotonic()
+        ttl = self._post_stream_reduce_guard_ttl
+        for sym in list(self._post_stream_reduce_guard.keys()):
+            if now - self._post_stream_reduce_guard[sym]["mono"] > ttl:
+                del self._post_stream_reduce_guard[sym]
+
+    def _consume_stream_reduce_reverse_skip(
+        self,
+        *,
+        symbol: str,
+        order_side: str,
+        qty: float,
+        old_pos,
+        eps: float,
+    ) -> bool:
+        """
+        True if ORDER_TRADE_UPDATE should not run single-fill reverse: stream already
+        applied the reduce (MARKET reduce often has R=false).
+        """
+        self._prune_stale_reduce_guards()
+        g = self._post_stream_reduce_guard.get(symbol)
+        if not g or not old_pos:
+            return False
+        if time.monotonic() - g["mono"] > self._post_stream_reduce_guard_ttl:
+            return False
+        if g["side"] != old_pos.side:
+            return False
+        if not self._fill_opposite_to_position(order_side, old_pos.side):
+            return False
+        osz = float(old_pos.size)
+        min_sz = self._get_symbol_min_size(symbol)
+        sz_tol = max(eps * 50, min_sz * 0.01, 1e-7, osz * 1e-6)
+        if abs(float(g["new_sz"]) - osz) > sz_tol:
+            return False
+        reduced = float(g["old_sz"]) - float(g["new_sz"])
+        if reduced <= 1e-12:
+            return False
+        q_tol = max(1e-6, min_sz * 0.01, qty * 1e-5)
+        if abs(reduced - qty) > q_tol:
+            return False
+        del self._post_stream_reduce_guard[symbol]
+        return True
 
     def register_signal(self, symbol, execution_id, signal_time, order_sent_time):
         key = f"{symbol}-{execution_id}"
@@ -133,6 +207,7 @@ class SyncEngine:
         self.bus.publish(AccountUpdated(state))
 
         self.position.apply_snapshot(positions)
+        self._post_stream_reduce_guard.clear()
         # 🔥 EMIT SNAPSHOT POSITIONS
         for pos in self.position.get_all():
             self.bus.publish(PositionUpdated(pos))
@@ -171,7 +246,23 @@ class SyncEngine:
                 # positions
                 for p in m["a"]["P"]:
                     ip = mapper.map_position(p)
+                    sym = ip.symbol
+                    before = self._position_side_size(sym)
                     status, pos = self.position.apply_event(ip)
+                    after = self._position_side_size(sym)
+
+                    if status == "UPDATED" and before and after:
+                        bs, bz = before
+                        a_s, az = after
+                        if bs == a_s and az < bz - max(
+                            1e-12, self._get_symbol_min_size(sym) * 1e-9
+                        ):
+                            self._register_same_side_reduction(sym, bs, bz, az)
+                    elif status == "CLOSED" and isinstance(pos, dict):
+                        ps = float(pos.get("previous_size", 0) or 0)
+                        sd = pos.get("side")
+                        if ps > 1e-8 and sd:
+                            self._register_same_side_reduction(sym, sd, ps, 0.0)
 
                     if status == "UPDATED":
                         self.bus.publish(PositionUpdated(pos))
@@ -322,6 +413,18 @@ class SyncEngine:
                 )
                 # ===== REVERSE SAFE =====
                 status, pos = self.position.apply_event(p)
+
+                if status == "UPDATED" and old_pos and old_pos.side == side:
+                    if size < float(old_pos.size) - max(
+                        1e-12, self._get_symbol_min_size(symbol) * 1e-9
+                    ):
+                        self._register_same_side_reduction(
+                            symbol, old_pos.side, float(old_pos.size), size
+                        )
+                elif status == "CLOSED" and old_pos:
+                    self._register_same_side_reduction(
+                        symbol, old_pos.side, float(old_pos.size), 0.0
+                    )
 
                 if status == "UPDATED":
                     self.bus.publish(PositionUpdated(pos))
@@ -643,14 +746,24 @@ class SyncEngine:
 
         osz = float(old_pos.size)
 
+        # Reduce-only: never run single-fill reverse. If POSITION_UPDATE / ACCOUNT_UPDATE ran
+        # before ORDER_TRADE_UPDATE, osz is already the remainder while qty is the fill (e.g.
+        # SHORT 0.025 + z=0.05) — qty > osz must not open the opposite leg.
+        if reduce_only and qty > osz + eps:
+            return
+
+        # MARKET manual reduce often has R=false; stream may already hold post-reduce size.
+        if qty > osz + eps and self._consume_stream_reduce_reverse_skip(
+            symbol=symbol,
+            order_side=order_side,
+            qty=qty,
+            old_pos=old_pos,
+            eps=eps,
+        ):
+            return
+
         # Single fill closes old and opens opposite (e.g. SHORT 0.045 + BUY 0.055 → LONG 0.01)
         if qty > osz + eps:
-            # Reduce-only: exchange never sends a fill larger than the reduced leg in a way
-            # that implies flip vs remainder. If ACCOUNT_UPDATE / POSITION_UPDATE already landed,
-            # osz is post-reduce remainder and qty is the fill — qty > osz is normal (e.g. SHORT
-            # 0.02 left, BUY filled 0.035). Do not treat as reverse.
-            if reduce_only:
-                return
             net = max(0.0, round(qty - osz, 8))
             new_side = "LONG" if order_side == "BUY" else "SHORT"
             z = PositionState(
