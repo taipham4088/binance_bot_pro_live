@@ -1,6 +1,7 @@
 let grid = null
 let equityChart = null
 let equityHistory = []
+let controlInitialized = false
 
 document.addEventListener("DOMContentLoaded", function(){
 
@@ -107,6 +108,119 @@ updateRisk(data)
 
 //updateSystemMonitor(data)
 updateStrategy(data)
+updateMarketBias(data)
+// Restore Pause / Resume
+if(data.config){
+
+const paused = data.config.trading_enabled === false
+
+if(paused){
+
+document.getElementById("pause_btn").style.background = "#ef4444"
+document.getElementById("pause_btn").style.color = "#fff"
+
+document.getElementById("resume_btn").style.background = ""
+document.getElementById("resume_btn").style.color = ""
+
+}else{
+
+document.getElementById("resume_btn").style.background = "#22c55e"
+document.getElementById("resume_btn").style.color = "#000"
+
+document.getElementById("pause_btn").style.background = ""
+document.getElementById("pause_btn").style.color = ""
+
+}
+
+}
+// Restore Control Panel
+if(data.config && !controlInitialized){
+
+// Trade Mode
+if(data.config.trade_mode){
+
+document.getElementById("trade_mode_select").value =
+data.config.trade_mode
+
+flashButton(
+document.querySelector("#trade_mode_select")
+.closest(".control-row")
+.querySelector("button")
+)
+
+}
+
+// Strategy
+if(data.config.strategy){
+
+document.getElementById("strategy_select").value =
+data.config.strategy
+
+flashButton(
+document.querySelector("#strategy_select")
+.closest(".control-row")
+.querySelector("button")
+)
+
+}
+
+// Trading Mode
+if(data.config.mode){
+
+document.getElementById("trading_mode_select").value =
+data.config.mode
+
+flashButton(
+document.querySelector("#trading_mode_select")
+.closest(".control-row")
+.querySelector("button")
+)
+
+}
+
+// Exchange
+if(data.config.exchange){
+
+document.getElementById("exchange_select").value =
+data.config.exchange
+
+flashButton(
+document.querySelector("#exchange_select")
+.closest(".control-row")
+.querySelector("button")
+)
+
+}
+
+// Symbol
+if(data.config.symbol){
+
+document.getElementById("symbol_select").value =
+data.config.symbol
+
+flashButton(
+document.querySelector("#symbol_select")
+.closest(".control-row")
+.querySelector("button")
+)
+
+}
+
+// Risk
+if(data.config.risk_percent){
+
+document.getElementById("risk_input").value =
+data.config.risk_percent
+
+flashButton(
+document.querySelector("#risk_input")
+.closest(".control-row")
+.querySelector("button")
+)
+
+}
+controlInitialized = true
+}
 //updatePerformance(data)
 
 updateSlippage(data)
@@ -154,7 +268,12 @@ await fetch("/api/control/pause",{
 method:"POST"
 })
 
-alert("Bot paused")
+// đổi màu
+document.getElementById("pause_btn").style.background = "#ef4444"
+document.getElementById("pause_btn").style.color = "#fff"
+
+document.getElementById("resume_btn").style.background = ""
+document.getElementById("resume_btn").style.color = ""
 
 }catch(e){
 
@@ -172,7 +291,12 @@ await fetch("/api/control/resume",{
 method:"POST"
 })
 
-alert("Bot resumed")
+// đổi màu
+document.getElementById("resume_btn").style.background = "#22c55e"
+document.getElementById("resume_btn").style.color = "#000"
+
+document.getElementById("pause_btn").style.background = ""
+document.getElementById("pause_btn").style.color = ""
 
 }catch(e){
 
@@ -1106,7 +1230,7 @@ Size: ${pos.size}
 `
 }
 
-async function setExchange(){
+async function setExchange(btn){
 
 const exchange =
 document.getElementById("exchange_select").value
@@ -1121,12 +1245,218 @@ headers:{
 body:JSON.stringify({exchange})
 })
 
-alert("Exchange set: " + exchange)
+flashButton(btn)
 
 }catch(e){
 
 console.error(e)
 
 }
+
+}
+
+function updateMarketBias(data){
+
+const bias = data?.market_bias
+
+if(!bias){
+
+document.getElementById("market_bias").innerHTML = `
+Market: -<br>
+Strategy: -<br>
+Execution: -
+`
+return
+}
+
+const market = bias.market_bias || "-"
+const strategy = bias.strategy_bias || "-"
+const execution = bias.execution_bias || "-"
+
+// color logic
+function color(v){
+
+if(v.includes("BULL")) return "#22c55e"
+if(v.includes("BEAR")) return "#ef4444"
+
+return "#e2e8f0"
+
+}
+
+document.getElementById("market_bias").innerHTML = `
+
+Market:
+<span style="color:${color(market)}">
+${market}
+</span>
+<br>
+
+Strategy:
+<span style="color:${color(strategy)}">
+${strategy}
+</span>
+<br>
+
+Execution:
+<span style="color:${color(execution)}">
+${execution}
+</span>
+
+`
+
+}
+
+async function setRisk(btn){
+
+const risk = document.getElementById("risk_input").value
+
+try{
+
+await fetch("/api/control/risk",{
+method:"POST",
+headers:{
+"Content-Type":"application/json"
+},
+body:JSON.stringify({risk:parseFloat(risk)})
+})
+
+flashButton(btn)
+
+}catch(e){
+
+console.error(e)
+
+}
+
+}
+
+
+async function setMode(btn){
+
+const mode = document.getElementById("trade_mode_select").value
+
+try{
+
+await fetch("/api/control/trade_mode",{
+method:"POST",
+headers:{
+"Content-Type":"application/json"
+},
+body:JSON.stringify({mode})
+})
+
+flashButton(btn)
+
+}catch(e){
+
+console.error(e)
+
+}
+
+}
+
+
+async function setTradingMode(btn){
+
+const mode = document.getElementById("trading_mode_select").value
+
+try{
+
+await fetch("/api/control/mode",{
+method:"POST",
+headers:{
+"Content-Type":"application/json"
+},
+body:JSON.stringify({mode})
+})
+
+flashButton(btn)
+
+}catch(e){
+
+console.error(e)
+
+}
+
+}
+
+
+async function setStrategy(btn){
+
+const strategy = document.getElementById("strategy_select").value
+
+try{
+
+await fetch("/api/control/strategy",{
+method:"POST",
+headers:{
+"Content-Type":"application/json"
+},
+body:JSON.stringify({strategy})
+})
+
+flashButton(btn)
+
+}catch(e){
+
+console.error(e)
+
+}
+
+}
+
+
+async function setSymbol(btn){
+
+const symbol = document.getElementById("symbol_select").value
+
+try{
+
+await fetch("/api/control/symbol",{
+method:"POST",
+headers:{
+"Content-Type":"application/json"
+},
+body:JSON.stringify({symbol})
+})
+
+flashButton(btn)
+
+}catch(e){
+
+console.error(e)
+
+}
+
+}
+
+function flashButton(button){
+
+const row = button.closest(".control-row")
+
+if(row){
+row.querySelectorAll("button").forEach(btn=>{
+btn.style.backgroundColor = ""
+btn.style.color = ""
+})
+}
+
+button.style.backgroundColor = "#22c55e"
+button.style.color = "#000"
+
+}
+
+function pendingButton(selectId){
+
+const select = document.getElementById(selectId)
+
+if(!select) return
+
+const button = select
+.closest(".control-row")
+.querySelector("button")
+
+button.style.backgroundColor = "#3b82f6"
+button.style.color = "#fff"
 
 }

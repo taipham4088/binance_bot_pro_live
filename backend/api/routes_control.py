@@ -1,6 +1,7 @@
 from fastapi import APIRouter
 from backend.runtime.runtime_config import runtime_config
 from backend.runtime.exchange_config import exchange_config
+from fastapi import Body
 
 router = APIRouter()
 
@@ -15,32 +16,28 @@ def resume_bot():
     return {"status": "running"}
 
 @router.post("/control/risk")
-def set_risk(risk: float):
-    runtime_config["risk_percent"] = risk
+def set_risk(data: dict = Body(...)):
+    runtime_config["risk_percent"] = data.get("risk")
     return runtime_config
 
 @router.post("/control/trade_mode")
-def set_mode(mode: str):
-    runtime_config["trade_mode"] = mode
+def set_trade_mode(data: dict = Body(...)):
+    runtime_config["trade_mode"] = data.get("mode")
     return runtime_config
 
 @router.post("/control/strategy")
-def set_strategy(strategy: str):
-    runtime_config["strategy"] = strategy
+def set_strategy(data: dict = Body(...)):
+    runtime_config["strategy"] = data.get("strategy")
     return runtime_config
 
 @router.post("/control/exchange")
-def set_exchange(exchange: str):
-
-    runtime_config["exchange"] = exchange
-
+def set_exchange(data: dict = Body(...)):
+    runtime_config["exchange"] = data.get("exchange")
     return runtime_config
 
 @router.post("/control/symbol")
-def set_symbol(symbol: str):
-
-    runtime_config["symbol"] = symbol
-
+def set_symbol(data: dict = Body(...)):
+    runtime_config["symbol"] = data.get("symbol")
     return runtime_config
 
 
@@ -94,12 +91,9 @@ def market_header():
     }
 
 @router.post("/control/mode")
-def set_mode(mode: str):
-
+def set_mode(data: dict = Body(...)):
     from backend.runtime.runtime_config import runtime_config
-
-    runtime_config["mode"] = mode
-
+    runtime_config["mode"] = data.get("mode")
     return runtime_config
 
 @router.get("/mode")

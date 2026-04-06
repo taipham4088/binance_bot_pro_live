@@ -26,6 +26,33 @@ async def ws_intent(websocket: WebSocket, session_id: str):
             intent_id = raw_msg.get("intent_id") or str(uuid4())
             payload = raw_msg.get("payload", {})
 
+            # =========================
+            # TRADE MODE GUARD
+            # =========================
+
+            from backend.runtime.runtime_config import runtime_config
+
+            trade_mode = runtime_config.get("trade_mode", "both")
+            side = payload.get("side")
+
+            if trade_mode == "long" and side == "SHORT":
+                print("[CONTROL] SHORT blocked — LONG only")
+
+                await websocket.send_json({
+                    "type": "EXECUTION_BLOCKED",
+                    "reason": "long_only"
+                })
+                continue
+
+            if trade_mode == "short" and side == "LONG":
+                print("[CONTROL] LONG blocked — SHORT only")
+
+                await websocket.send_json({
+                    "type": "EXECUTION_BLOCKED",
+                    "reason": "short_only"
+                })
+                continue
+
             manager: RunManager = websocket.app.state.manager
             session = manager.sessions.get(session_id)
 
@@ -69,6 +96,22 @@ async def ws_intent(websocket: WebSocket, session_id: str):
             )
 
             exec_intent.validate_schema()
+            
+            # =========================
+            # TRADING ENABLE CHECK
+            # =========================
+
+            from backend.runtime.runtime_config import runtime_config
+
+            if not runtime_config.get("trading_enabled", True):
+                print("[CONTROL] Trading paused — intent blocked")
+
+                await websocket.send_json({
+                    "type": "EXECUTION_BLOCKED",
+                    "reason": "trading_paused"
+                })
+
+                continue
 
             # =========================
             # IDEMPOTENCY GUARD

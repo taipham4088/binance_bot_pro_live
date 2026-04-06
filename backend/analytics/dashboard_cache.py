@@ -1,6 +1,8 @@
 import time
 import requests
 from backend.runtime.exchange_config import exchange_config
+from backend.analytics.market_bias_engine import market_bias_engine
+from backend.runtime.runtime_config import runtime_config
 
 
 class DashboardCache:
@@ -204,13 +206,43 @@ class DashboardCache:
         else:
             trades = []
 
+        # ------------------------------
+        # Market Bias
+        # ------------------------------
+
+        strategy_side = None
+
+        try:
+            manager = self.app_state.manager
+            sessions = manager.sessions
+
+            if sessions:
+                session = list(sessions.values())[0]
+                state = session.system_state.state
+                strategy = state.get("strategy", {})
+                strategy_side = strategy.get("side")
+
+        except Exception:
+            strategy_side = None
+
+        market_bias_engine.update(
+            position=position,
+            strategy_side=strategy_side
+        )
+
+        # ------------------------------
+        # Dashboard Cache
+        # ------------------------------
+
         self.cache = {
             "timestamp": int(time.time()),
             "position": position,
             "price": price,
             "pnl": pnl,
             "metrics": metrics,
-            "recent_trades": trades
+            "recent_trades": trades,
+            "market_bias": market_bias_engine.get(),
+            "config": runtime_config
         }
 
         self.last_update = time.time()

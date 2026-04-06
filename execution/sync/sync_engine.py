@@ -653,7 +653,7 @@ class SyncEngine:
 
         # Single fill closes old and opens opposite (e.g. SHORT 0.045 + BUY 0.055 → LONG 0.01)
         if qty > osz + eps:
-            net = qty - osz
+            net = max(0.0, round(qty - osz, 8))
             new_side = "LONG" if order_side == "BUY" else "SHORT"
             z = PositionState(
                 symbol=symbol,
@@ -702,7 +702,7 @@ class SyncEngine:
             return
 
         # Partial reduce only
-        new_sz = max(0.0, osz - qty)
+        new_sz = max(0.0, round(osz - qty, 8))
         if new_sz <= min_sz * 0.5:
             z = PositionState(
                 symbol=symbol,
