@@ -37,6 +37,8 @@ class SyncEngine:
         # Same-side size drop from ACCOUNT/POSITION before ORDER_TRADE_UPDATE (R may be false on MARKET reduce)
         self._post_stream_reduce_guard = {}
         self._post_stream_reduce_guard_ttl = 3.0
+        # Binance order id -> latest cumulative z on PARTIALLY_FILLED; cleared on FILLED
+        self._order_fill_accumulator = {}
 
     def _position_side_size(self, symbol: str):
         for p in self.position.get_all():
@@ -208,6 +210,7 @@ class SyncEngine:
 
         self.position.apply_snapshot(positions)
         self._post_stream_reduce_guard.clear()
+        self._order_fill_accumulator.clear()
         # 🔥 EMIT SNAPSHOT POSITIONS
         for pos in self.position.get_all():
             self.bus.publish(PositionUpdated(pos))
@@ -480,6 +483,9 @@ class SyncEngine:
 
                     print("🔥 ACK RECEIVED:", key)
 
+                if o.get("i") is not None and o.get("X") == "PARTIALLY_FILLED":
+                    self._order_fill_accumulator[str(o["i"])] = float(o.get("z", 0))
+
                 if o.get("X") == "FILLED":
                     from backend.analytics.analytics_bus import analytics_bus
 
@@ -488,6 +494,14 @@ class SyncEngine:
                     side = o.get("S")
                     qty = float(o.get("z", 0))
                     price = float(o.get("L", 0))
+
+                    oid = o.get("i")
+                    oid_str = str(oid) if oid is not None else None
+                    skip_net_from_ws_partials = (
+                        bool(oid_str) and oid_str in self._order_fill_accumulator
+                    )
+                    if oid_str:
+                        self._order_fill_accumulator.pop(oid_str, None)
                     
                     # 🔥 AUTO CLOSE AFTER FILL
                     if self._pending_manual_close.get(symbol):
@@ -560,14 +574,15 @@ class SyncEngine:
                             if p.symbol == symbol:
                                 old_pos_ro = p
                                 break
-                        self._apply_position_net_after_opposite_fill(
-                            symbol=symbol,
-                            order_side=side,
-                            qty=qty,
-                            price=price,
-                            old_pos=old_pos_ro,
-                            reduce_only=True,
-                        )
+                        if not skip_net_from_ws_partials:
+                            self._apply_position_net_after_opposite_fill(
+                                symbol=symbol,
+                                order_side=side,
+                                qty=qty,
+                                price=price,
+                                old_pos=old_pos_ro,
+                                reduce_only=True,
+                            )
 
                         return
 
@@ -624,13 +639,14 @@ class SyncEngine:
 
                     # Opposite-side fill: sync full/partial close or single-fill reverse (not only reduce_only)
                     if old_pos and self._fill_opposite_to_position(side, old_pos.side):
-                        self._apply_position_net_after_opposite_fill(
-                            symbol=symbol,
-                            order_side=side,
-                            qty=qty,
-                            price=price,
-                            old_pos=old_pos,
-                        )
+                        if not skip_net_from_ws_partials:
+                            self._apply_position_net_after_opposite_fill(
+                                symbol=symbol,
+                                order_side=side,
+                                qty=qty,
+                                price=price,
+                                old_pos=old_pos,
+                            )
                         return
 
                     current_pos = None

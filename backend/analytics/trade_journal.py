@@ -32,9 +32,64 @@ class TradeJournal:
         self._last_close_key = None
         self._open_fill_ctx = {}
         self._open_fill_window_sec = 2.5
+        self._pending_restore_trade = None
+        self._exchange_position_resolver = None
 
         self._init_db()
         self._restore_current_trade()
+
+    def set_exchange_position_resolver(self, resolver):
+        """Resolver receives symbol and returns truth: bool|dict|None."""
+        self._exchange_position_resolver = resolver
+        with self._lock:
+            self._resolve_pending_restore()
+
+    def _resolve_pending_restore(self):
+        if self.current_trade is not None or not self._pending_restore_trade:
+            return
+
+        resolver = self._exchange_position_resolver
+        if not resolver:
+            return
+
+        pending = self._pending_restore_trade
+        symbol = pending.get("symbol")
+
+        try:
+            truth = resolver(symbol)
+        except Exception as e:
+            print("Resolve pending restore error:", e)
+            return
+
+        # Unknown truth -> keep pending, never materialize blindly.
+        if truth is None:
+            return
+
+        has_pos = False
+        side_ok = True
+
+        if isinstance(truth, bool):
+            has_pos = truth
+        elif isinstance(truth, dict):
+            size = float(truth.get("size", 0) or 0)
+            has_pos = size > 0
+            t_side = truth.get("side")
+            p_side = pending.get("side")
+            if t_side and p_side:
+                side_ok = str(t_side).upper() == str(p_side).upper()
+        else:
+            return
+
+        if not has_pos or not side_ok:
+            self._pending_restore_trade = None
+            self._clear_current_trade()
+            return
+
+        self.current_trade = pending
+        self._pending_restore_trade = None
+        if not TradeJournal._restore_done:
+            TradeJournal._restore_done = True
+            print("♻ RESTORE OPEN TRADE:", self.current_trade)
 
     @staticmethod
     def _trade_client_order_id(data: dict):
@@ -140,6 +195,7 @@ class TradeJournal:
     def handle_event(self, event_type, data):
 
         with self._lock:
+            self._resolve_pending_restore()
             if event_type == "POSITION_OPEN":
 
                 self.on_position_open(
@@ -164,6 +220,7 @@ class TradeJournal:
     def handle_trade(self, data: dict):
 
         with self._lock:
+            self._resolve_pending_restore()
             if not data:
                 return
 
@@ -296,6 +353,7 @@ class TradeJournal:
         """Close only if a position is open; ignore duplicate CLOSE (e.g. account + order path)."""
         if self.current_trade is None:
             self._restore_current_trade(force=True)
+            self._resolve_pending_restore()
         if self.current_trade is None:
             return
         self.on_position_close(price, size, fee)
@@ -315,6 +373,7 @@ class TradeJournal:
 
             with open(path, "w") as f:
                 json.dump(self.current_trade, f)
+            self._pending_restore_trade = None
 
         except Exception as e:
             print("Persist open trade error:", e)
@@ -332,11 +391,11 @@ class TradeJournal:
                 return
 
             with open(path, "r") as f:
-                self.current_trade = json.load(f)
+                loaded = json.load(f)
 
-            if not TradeJournal._restore_done:
-                TradeJournal._restore_done = True
-                print("♻ RESTORE OPEN TRADE:", self.current_trade)
+            # Startup-safe: keep as pending until exchange truth confirms position exists.
+            self._pending_restore_trade = loaded
+            self._resolve_pending_restore()
 
         except Exception as e:
             print("Restore open trade error:", e)
@@ -345,6 +404,7 @@ class TradeJournal:
     def _clear_current_trade(self):
 
         try:
+            self._pending_restore_trade = None
             path = self._get_open_trade_path()
 
             if os.path.exists(path):

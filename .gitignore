@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+*.db
+data/
+execution_journal.db
+.cursor/
+.vscode/

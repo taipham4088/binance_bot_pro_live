@@ -19,6 +19,7 @@ from execution.live_execution_system import LiveExecutionSystem
 from execution.sync.sync_engine import SyncEngine
 from execution.state.store import StateStore
 from execution.adapter.exchange_factory import create_exchange_adapter
+from backend.observability.execution_monitor_instance import trade_journal
 
 
 def build_live_execution_system(config, event_bus, logger):
@@ -59,6 +60,33 @@ def build_live_execution_system(config, event_bus, logger):
     execution_window = ExecutionWindow(event_bus=exec_event_bus)
 
     sync_engine = SyncEngine(event_bus=event_bus, logger=logger)
+    # Attach TradeJournal restore resolver to exchange-synced position truth.
+    # None: sync not ready/unknown, False: flat, dict: open position.
+    def _journal_restore_resolver(symbol: str):
+        if not getattr(sync_engine, "_bootstrapped", False):
+            return None
+        min_sz = sync_engine._get_symbol_min_size(symbol)
+        for p in sync_engine.position.get_all():
+            if p.symbol == symbol:
+                sz = abs(float(p.size))
+                if sz > min_sz * 0.5:
+                    return {"side": p.side, "size": sz}
+                return False
+        return False
+
+    trade_journal.set_exchange_position_resolver(_journal_restore_resolver)
+
+    # Resolve pending open_trade.json as soon as sync snapshot lands (_bootstrapped True).
+    _orig_bootstrap = sync_engine.bootstrap
+
+    def _bootstrap_then_resolve_journal(snapshot):
+        _orig_bootstrap(snapshot)
+        try:
+            trade_journal._resolve_pending_restore()
+        except Exception as e:
+            print("[BOOTSTRAP] trade journal pending restore error:", e)
+
+    sync_engine.bootstrap = _bootstrap_then_resolve_journal
 
     # 👉 SINGLE SOURCE OF ANALYTICS
     analytics_stub = StubExecution(session_id=session_id, mode="live-sync")
