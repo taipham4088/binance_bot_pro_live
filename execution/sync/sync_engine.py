@@ -526,6 +526,7 @@ class SyncEngine:
                         print("SYNC ENGINE ID:", id(self))
                         print("SYNC LATENCY BUFFER ID:", id(self._latency_buffer))
                         print("[READ METADATA]", metadata)
+                        print("[TRACE 5] SYNC METADATA", metadata)
                         print("[BRACKET METADATA]", metadata)
                         execution.register_pending_brackets(
                             execution_id=execution_id,

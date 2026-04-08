@@ -382,6 +382,7 @@ class ExecutionOrchestrator:
             type(plan),
             getattr(plan, "metadata", None),
         )
+        print("[TRACE 3] PLAN", getattr(plan, "metadata", None))
         return NewExecutionDecision(plan=plan)
 
     

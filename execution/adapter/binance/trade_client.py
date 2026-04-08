@@ -34,12 +34,16 @@ class BinanceTradeClient:
         if self.execution_state.is_frozen():
             raise Exception("🚨 EXECUTION FROZEN — TRADE BLOCKED")
 
-        # không có execution context → breach
+        # SL/TP follow-up orders có thể không có execution active
         if execution_id is None:
-            raise ExecutionBreach("ORDER WITHOUT EXECUTION CONTEXT")
+            return
 
-        # execution authority guard
-        self.execution_lock.guard(execution_id)
+        try: 
+            self.execution_lock.guard(execution_id)
+        except ExecutionBreach:
+            # 🔥 allow SL/TP follow-up orders
+            print("[LOCK BYPASS] follow-up order allowed")
+            return
 
     # ============================================================
     # TRADE API (GUARDED)
@@ -56,6 +60,7 @@ class BinanceTradeClient:
             f"{kwargs.get('side')}:"
             f"{kwargs.get('quantity')}:"
             f"{kwargs.get('reduceOnly')}"
+            f"{kwargs.get('type')}"
         )
 
         if order_key in self._executed_orders:

@@ -2,7 +2,7 @@
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import Optional
+from typing import Optional, Dict, Any
 import time
 
 
@@ -42,6 +42,7 @@ class ExecutionPlan:
     reason: str
     source: str
     timestamp: int
+    metadata: Optional[Dict[str, Any]] = None
 
 
 # =========================

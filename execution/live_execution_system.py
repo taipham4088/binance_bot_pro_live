@@ -4,6 +4,7 @@ import asyncio
 import uuid
 from types import SimpleNamespace
 
+from execution.metadata_registry import execution_metadata_registry
 from backend.core.execution_models import ExecutionPlan, PlanAction, PositionSide
 from trading_core.execution_policy.position_projector import NetPositionProjector
 from execution.state.execution_state import ExecutionState, ExecutionStatus
@@ -27,6 +28,7 @@ class LiveExecutionSystem:
     - KhÃ´ng Ä‘á»c intent
     - Chá»‰ thá»±c thi ExecutionPlan
     """
+    print("🔥 LIVE EXECUTION FILE LOADED", __file__)
 
     def __init__(
         self,
@@ -169,6 +171,7 @@ class LiveExecutionSystem:
         return self._pending_brackets.pop(key, None)
 
     async def execute_plan(self, plan: ExecutionPlan):
+        print("🔥 EXECUTE_PLAN HIT", id(self))
 
         # =========================
         # TRADE PERMISSION GUARD
@@ -200,7 +203,15 @@ class LiveExecutionSystem:
         symbol = plan.symbol
         quantity = float(plan.quantity)
         metadata = getattr(plan, "metadata", {}) or {}
+        print("[TRACE 4] EXEC PLAN", getattr(plan, "metadata", None))
         print("[PLAN METADATA]", metadata)
+        # 🔥 REGISTER METADATA (NEW REGISTRY)
+        execution_metadata_registry.register(
+            execution_id,
+            metadata
+        )
+
+        print("[REGISTRY REGISTER]", execution_id, metadata)
         intent_id = (
             getattr(plan, "intent_id", None)
             or metadata.get("intent_id")
@@ -226,6 +237,25 @@ class LiveExecutionSystem:
                 None
             )
 
+            # 🔥 ATTACH METADATA TO SYNC ENGINE
+            key = f"{symbol}-{execution_id}"
+            latency = self.sync_engine._latency_buffer.setdefault(key, {})
+
+            latency["metadata"] = getattr(plan, "metadata", {})
+
+            print("[TRACE FINAL] ATTACH METADATA", key, latency["metadata"])
+            
+            # 🔥 ATTACH METADATA TO LATENCY BUFFER
+            try:
+                key = f"{symbol}-{execution_id}"
+                latency = self.sync_engine._latency_buffer.setdefault(key, {})
+                latency["metadata"] = metadata
+
+                print("[PLAN METADATA]", metadata)
+                print("[ATTACH METADATA]", key, latency["metadata"])
+
+            except Exception as e:
+                print("[ATTACH METADATA ERROR]", e)
         except Exception as e:
             print("[LATENCY REGISTER ERROR]", e)
 

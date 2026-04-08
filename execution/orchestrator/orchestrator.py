@@ -48,6 +48,7 @@ class ExecutionOrchestrator:
     # ============================================================
 
     async def submit_intent(self, intent):
+        print("[TRACE 2] ORCH INTENT", getattr(intent, "metadata", None))
 
         if self.execution_state.status != ExecutionStatus.READY:
             raise Exception("EXECUTION NOT READY")
@@ -164,30 +165,40 @@ class ExecutionOrchestrator:
 
         positions = self.execution_system.sync_engine.position.get_all()
 
-        # ❌ KHÔNG dùng intent nữa
-        # ✅ CHỈ dùng target hợp hiến
         plan = self.planner.build_plan(
             positions=positions,
             target=decision.target
         )
+
         plan.execution_id = exec_id
+
+        # 🔥 PROPAGATE METADATA
+        plan.metadata = getattr(intent, "metadata", {})
+
+        # 🔥 STORE METADATA
+        self._execution_metadata = getattr(self, "_execution_metadata", {})
+        self._execution_metadata[exec_id] = plan.metadata
+
+        print("[TRACE 3] PLAN", plan.metadata)
+        print("[TRACE 4] EXEC PLAN", plan.metadata)
 
         # 🔒 STEP 6 — verify planner
         self.planner_guard.verify_plan(plan, decision.transition)
-       
+
         for step in plan.steps:
             if step.action == StepAction.CLOSE:
                 close_count += 1
             elif step.action == StepAction.OPEN:
                 open_count += 1
+
             await self._execute_step(exec_id, step)
 
-        # ✅ FINALIZE AFTER ALL STEPS
         await self._finalize(exec_id, decision)
+
         if decision.transition == "REVERSE":
             reverse_duration = time.monotonic() - run_start
             record_reverse_cycle(reverse_duration)
-        # reset failure counter on success
+
         self._consecutive_failures = 0
 
     # ============================================================
@@ -251,6 +262,26 @@ class ExecutionOrchestrator:
 
         # ===== SEND ORDER =====
         client_order_id = f"{exec_id[:8]}_{uuid.uuid4().hex[:12]}"
+        key = f"{symbol}-{client_order_id}"
+
+        latency = self.execution_system.sync_engine._latency_buffer.setdefault(key, {})
+
+        metadata = getattr(self, "_execution_metadata", {}).get(exec_id, {})
+
+        latency["metadata"] = metadata
+
+        print("[TRACE LATENCY ATTACH]", key, metadata)
+        # 🔥 GET METADATA FROM EXECUTION STORE
+        metadata = getattr(self, "_execution_metadata", {}).get(exec_id, {})
+
+        # 🔥 REGISTER METADATA USING CLIENT ORDER ID
+        if hasattr(self.execution_system, "register_execution_metadata"):
+            self.execution_system.register_execution_metadata(
+                client_order_id,
+                metadata
+            )
+
+        print("[TRACE FINAL CLIENT]", client_order_id, metadata)
 
         # 1️⃣ SEND ORDER FIRST
         resp = self.execution_system.exchange.trade.place_order(

@@ -213,30 +213,30 @@ class BinanceExecutionAdapter(BaseExchangeAdapter):
         self, symbol, side, quantity, stop_price, execution_id
     ):
         close_side = "SELL" if side == "LONG" else "BUY"
+
         self.trade.place_order(
             execution_id=execution_id,
             symbol=symbol,
             side=close_side,
             type="STOP_MARKET",
             stopPrice=float(stop_price),
-            reduceOnly=True,
-            closePosition=False,
-            quantity=quantity,
+            closePosition=True,   # ✅ bật close position
+            workingType="CONTRACT_PRICE"
         )
 
     async def place_take_profit(
         self, symbol, side, quantity, tp_price, execution_id
     ):
         close_side = "SELL" if side == "LONG" else "BUY"
+
         self.trade.place_order(
             execution_id=execution_id,
             symbol=symbol,
             side=close_side,
             type="TAKE_PROFIT_MARKET",
             stopPrice=float(tp_price),
-            reduceOnly=True,
-            closePosition=False,
-            quantity=quantity,
+            closePosition=True,   # ✅ bật close position
+            workingType="CONTRACT_PRICE"
         )
 
     async def _maybe_place_brackets(

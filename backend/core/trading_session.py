@@ -490,6 +490,7 @@ class TradingSession:
     # =====================================================
     async def inject_intent(self, intent):
         import asyncio
+        print("[TRACE 1] INTENT", getattr(intent, "metadata", None))
         if self.execution_orchestrator is None:
             raise RuntimeError(
                 "Session execution stack not started (start_session required)"
@@ -593,7 +594,8 @@ class TradingSession:
             action=action,
             symbol=intent.symbol,
             size=intent.qty,
-            source=intent.source
+            source=intent.source,
+            metadata=getattr(intent, "metadata", {})
         )
 
         # =========================

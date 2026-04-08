@@ -70,6 +70,7 @@ class SessionRuntime:
             symbol=payload.get("symbol"),
             size=payload.get("size"),
             source=ws_intent.source,
+            metadata=payload, 
         )
 
     async def handle_intent(
