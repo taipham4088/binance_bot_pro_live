@@ -226,6 +226,9 @@ class LiveExecutionSystem:
             key = f"{symbol}-{execution_id}"
             latency = self.sync_engine._latency_buffer.setdefault(key, {})
             latency["metadata"] = metadata
+            print("LIVE SYNC ENGINE ID:", id(self.sync_engine))
+            print("LIVE LATENCY BUFFER ID:", id(self.sync_engine._latency_buffer))
+            print("[ATTACH METADATA]", metadata)
         except Exception as e:
             print("[LATENCY REGISTER ERROR]", e)
 
