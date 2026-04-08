@@ -153,7 +153,7 @@ class LiveExecutionSystem:
         )
         if not sl and not tp:
             return
-        bracket_key = f"{symbol}-{client_order_id or execution_id}"
+        bracket_key = f"{symbol}-{execution_id}"
         self._pending_brackets[bracket_key] = {
             "symbol": symbol,
             "side": side,
@@ -163,10 +163,10 @@ class LiveExecutionSystem:
         }
         print("[BRACKET STORED]", bracket_key)
 
-    def pop_pending_brackets(self, execution_id: str):
-        if not execution_id:
+    def pop_pending_brackets(self, key: str):
+        if not key:
             return None
-        return self._pending_brackets.pop(execution_id, None)
+        return self._pending_brackets.pop(key, None)
 
     async def execute_plan(self, plan: ExecutionPlan):
 
