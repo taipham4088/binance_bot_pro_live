@@ -674,11 +674,13 @@ class SyncEngine:
                         execution = getattr(self, "live_execution_system", None)
                         client_order_id = o.get("c") or execution_id
                         key = f"{symbol}-{client_order_id}"
+                        print("[BRACKET LOOKUP]", key)
                         pending = (
                             execution.pop_pending_brackets(key)
                             if execution and hasattr(execution, "pop_pending_brackets")
                             else None
                         )
+                        print("[BRACKET RESULT]", pending)
                         if pending:
                             sl = pending.get("sl")
                             tp = pending.get("tp")

@@ -138,6 +138,16 @@ class LiveExecutionSystem:
             return
         sl = metadata.get("sl")
         tp = metadata.get("tp")
+        print(
+            "[BRACKET REGISTER]",
+            "symbol=", symbol,
+            "side=", side,
+            "qty=", quantity,
+            "sl=", sl,
+            "tp=", tp,
+            "execution_id=", execution_id,
+            "client_order_id=", client_order_id,
+        )
         if not sl and not tp:
             return
         bracket_key = f"{symbol}-{client_order_id or execution_id}"
@@ -148,6 +158,7 @@ class LiveExecutionSystem:
             "sl": sl,
             "tp": tp,
         }
+        print("[BRACKET STORED]", bracket_key)
 
     def pop_pending_brackets(self, execution_id: str):
         if not execution_id:
