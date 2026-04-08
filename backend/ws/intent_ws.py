@@ -77,21 +77,20 @@ async def ws_intent(websocket: WebSocket, session_id: str):
 
             if positions:
                 pos = positions[0]
-                metadata = {
-                    "position_side": pos.get("side"),
-                    "position_size": pos.get("size")
-                }
             else:
-                metadata = {
-                    "position_side": "flat",
-                    "position_size": 0
-                }
+                pos = {}
 
 
             # =========================
             # BUILD EXECUTION INTENT
             # =========================
-            metadata["price"] = payload.get("price")
+            incoming_metadata = raw_msg.get("metadata", {}) or {}
+            metadata = dict(incoming_metadata)
+            metadata.update({
+                "position_side": pos.get("side") if positions else "flat",
+                "position_size": pos.get("size") if positions else 0,
+                "price": payload.get("price")
+            })
 
             exec_intent = ExecutionIntent(
                 intent_id=intent_id,
