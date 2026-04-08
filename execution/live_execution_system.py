@@ -240,6 +240,23 @@ class LiveExecutionSystem:
                 execution_id=execution_id
             )
 
+            # register immediately after open_position
+            try:
+                raw = getattr(fill, "raw", None) or {}
+                client_order_id = raw.get("clientOrderId") if isinstance(raw, dict) else None
+
+                self.register_pending_brackets(
+                    execution_id=execution_id,
+                    client_order_id=client_order_id,
+                    symbol=symbol,
+                    side=plan.side.value.upper(),
+                    quantity=quantity,
+                    metadata=getattr(plan, "metadata", {}) or {},
+                )
+
+            except Exception as e:
+                print("[BRACKET REGISTER ERROR]", e)
+
             actual_qty = float(getattr(fill, "filled_quantity", 0))
 
             # 🔥 don't fail on zero fill (websocket confirm later)
@@ -251,20 +268,6 @@ class LiveExecutionSystem:
                     side=plan.side.value.lower(),
                     filled_qty=actual_qty,
                 )
-            # Store bracket intent and place after websocket FILLED confirms open.
-            try:
-                raw = getattr(fill, "raw", None) or {}
-                client_order_id = raw.get("clientOrderId") if isinstance(raw, dict) else None
-                self.register_pending_brackets(
-                    execution_id=execution_id,
-                    client_order_id=client_order_id,
-                    symbol=symbol,
-                    side=plan.side.value.upper(),
-                    quantity=quantity,
-                    metadata=getattr(plan, "metadata", {}) or {},
-                )
-            except Exception as e:
-                print("[BRACKET STORE ERROR]", e)
 
         # =========================
         # CLOSE / REDUCE
