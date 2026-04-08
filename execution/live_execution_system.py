@@ -190,7 +190,7 @@ class LiveExecutionSystem:
 
         symbol = plan.symbol
         quantity = float(plan.quantity)
-        self._last_intent_metadata[symbol] = getattr(plan, "metadata", {}) or {}
+        self._last_intent_metadata[execution_id] = getattr(plan, "metadata", {}) or {}
 
         # =========================
         # EXECUTION

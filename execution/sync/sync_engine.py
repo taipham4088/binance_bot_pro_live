@@ -523,7 +523,7 @@ class SyncEngine:
                             symbol=symbol,
                             side=o.get("S"),
                             quantity=float(o.get("q")),
-                            metadata=execution._last_intent_metadata.get(symbol, {}),
+                            metadata=execution._last_intent_metadata.get(execution_id, {}),
                         )
 
                 if o.get("i") is not None and o.get("X") == "PARTIALLY_FILLED":
