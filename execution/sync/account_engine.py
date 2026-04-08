@@ -20,3 +20,9 @@ class AccountEngine:
         self.state.available[balance.asset] = balance.available
         self.state.last_update = time.time()
         return self.state
+
+    def get_equity(self, asset="USDT"):
+        v = self.state.balances.get(asset, 0)
+        if v is None:
+            return 0.0
+        return float(v)

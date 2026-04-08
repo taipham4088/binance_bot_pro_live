@@ -48,10 +48,7 @@ def _qty_from_risk(session: TradingSession, order_intent: dict) -> float:
     if not math.isfinite(risk_percent) or risk_percent <= 0:
         raise ValueError("session risk_per_trade must be a positive finite number")
 
-    sa = getattr(session, "strategy_account", None)
-    if sa is None or not hasattr(sa, "get_equity"):
-        raise RuntimeError("session.strategy_account with get_equity() is required for sizing")
-    equity = float(sa.get_equity())
+    equity = float(session.get_dynamic_equity())
     if not math.isfinite(equity) or equity < 0:
         raise ValueError("strategy account equity must be a non-negative finite number")
 

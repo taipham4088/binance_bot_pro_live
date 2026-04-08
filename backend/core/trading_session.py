@@ -663,3 +663,18 @@ class TradingSession:
     def get_risk_config(self):
 
         return self.risk_config
+
+    def get_dynamic_equity(self):
+        try:
+            sync_engine = getattr(self.engine, "sync_engine", None)
+
+            if sync_engine:
+                return sync_engine.account.get_equity()
+
+        except Exception:
+            pass
+
+        sa = getattr(self, "strategy_account", None)
+        if sa is not None and hasattr(sa, "get_equity"):
+            return sa.get_equity()
+        return 0.0
