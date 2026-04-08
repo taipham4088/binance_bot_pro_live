@@ -223,6 +223,9 @@ class LiveExecutionSystem:
                 signal_time,
                 None
             )
+            key = f"{symbol}-{execution_id}"
+            latency = self.sync_engine._latency_buffer.setdefault(key, {})
+            latency["metadata"] = metadata
         except Exception as e:
             print("[LATENCY REGISTER ERROR]", e)
 

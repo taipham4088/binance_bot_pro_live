@@ -517,14 +517,9 @@ class SyncEngine:
 
                     execution = getattr(self, "live_execution_system", None)
                     if execution and hasattr(execution, "register_pending_brackets"):
-                        intent_id = None
-                        if hasattr(execution, "_execution_to_intent"):
-                            intent_id = execution._execution_to_intent.get(execution_id)
-                        if intent_id and hasattr(execution, "_execution_to_intent"):
-                            execution._execution_to_intent[client_id] = intent_id
-                        metadata = {}
-                        if intent_id:
-                            metadata = execution._last_intent_metadata.get(intent_id, {})
+                        latency = self._latency_buffer.get(key, {})
+                        metadata = latency.get("metadata", {})
+                        print("[BRACKET METADATA]", metadata)
                         execution.register_pending_brackets(
                             execution_id=execution_id,
                             client_order_id=o.get("c"),
