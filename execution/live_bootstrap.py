@@ -77,7 +77,9 @@ def build_live_execution_system(config, event_bus, logger, persistence_key=None)
     execution_state = ExecutionState()
     execution_state.to_bootstrapping()
 
-    execution_lock = ExecutionLock(event_bus=exec_event_bus)
+    execution_lock = ExecutionLock(
+        event_bus=exec_event_bus, execution_state=execution_state
+    )
     execution_window = ExecutionWindow(event_bus=exec_event_bus)
 
     sync_engine = SyncEngine(event_bus=event_bus, logger=logger)

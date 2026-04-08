@@ -26,8 +26,9 @@ class ExecutionPhase(str, Enum):
 
 class ExecutionLock:
 
-    def __init__(self, event_bus=None):
+    def __init__(self, event_bus=None, execution_state=None):
         self.event_bus = event_bus
+        self.execution_state = execution_state
         self.reset()
 
     # ---------------- core state ----------------
@@ -50,6 +51,10 @@ class ExecutionLock:
             raise ExecutionBusy("execution already running")
 
         exec_id = str(uuid.uuid4())
+
+        md = getattr(intent, "metadata", None)
+        if self.execution_state is not None and isinstance(md, dict):
+            self.execution_state.set_metadata(exec_id, dict(md))
 
         self.state = ExecutionState.RUNNING
         self.execution_id = exec_id
@@ -84,6 +89,8 @@ class ExecutionLock:
     def release(self, execution_id: str):
         self.guard(execution_id)
         self._emit("ExecutionFinished", exec_id=execution_id)
+        if self.execution_state is not None and self.execution_id:
+            self.execution_state.pop_metadata(self.execution_id)
         self.reset()
 
     def abort(self, reason: str, by="system"):
@@ -91,6 +98,8 @@ class ExecutionLock:
             return
         self.phase = ExecutionPhase.ABORTING
         self._emit("ExecutionAborted", exec_id=self.execution_id, reason=reason, by=by)
+        if self.execution_state is not None and self.execution_id:
+            self.execution_state.pop_metadata(self.execution_id)
         self.reset()
 
     # ---------------- snapshot ----------------

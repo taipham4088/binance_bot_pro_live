@@ -1,4 +1,8 @@
+from __future__ import annotations
+
+import asyncio
 import time
+from typing import Optional
 from binance import Client
 from .trade_client import BinanceTradeClient
 from .user_stream import BinanceUserStream
@@ -7,6 +11,52 @@ from . import mapper
 from execution.adapter.base_exchange_adapter import BaseExchangeAdapter
 from execution.fill_result import FillResult
 from backend.runtime.exchange_config import exchange_config
+
+
+class _BracketAwareTradeClient(BinanceTradeClient):
+    """
+    After orchestrator MARKET entry fills, schedule protective STOP / TP on the event loop.
+    Suppressed when BinanceExecutionAdapter.open_position calls place_order (brackets placed there).
+    """
+
+    def __init__(self, client, execution_state, execution_lock, symbol: str, adapter):
+        super().__init__(client, execution_state, execution_lock, symbol)
+        self._adapter = adapter
+
+    def place_order(self, *, execution_id=None, **kwargs):
+        resp = super().place_order(execution_id=execution_id, **kwargs)
+        try:
+            if getattr(self._adapter, "_bracket_hook_suppressed", False):
+                return resp
+            if kwargs.get("type") != "MARKET" or kwargs.get("reduceOnly"):
+                return resp
+            qty = float(resp.get("executedQty", 0) or 0)
+            if qty <= 0:
+                return resp
+            sym = kwargs.get("symbol") or self.symbol
+            bin_side = kwargs.get("side")
+            if bin_side not in ("BUY", "SELL"):
+                return resp
+            pos_side = "LONG" if bin_side == "BUY" else "SHORT"
+
+            md_snapshot = {}
+            es = self.execution_state
+            if es is not None and hasattr(es, "get_metadata"):
+                md_snapshot = dict(es.get_metadata(execution_id or ""))
+
+            async def _run():
+                await self._adapter._maybe_place_brackets(
+                    sym, pos_side, qty, execution_id, metadata=md_snapshot
+                )
+
+            try:
+                loop = asyncio.get_running_loop()
+                loop.create_task(_run())
+            except RuntimeError:
+                pass
+        except Exception as e:
+            print("[BRACKET_HOOK_ERROR]", e)
+        return resp
 
 
 class ExchangePositionView:
@@ -58,12 +108,14 @@ class BinanceExecutionAdapter(BaseExchangeAdapter):
         self.symbol = symbol
         self.sync_engine = sync_engine
 
-        # ===== GUARDED TRADE CLIENT =====
-        self.trade = BinanceTradeClient(
+        # ===== GUARDED TRADE CLIENT (bracket hook for orchestrator MARKET entries) =====
+        self._bracket_hook_suppressed = False
+        self.trade = _BracketAwareTradeClient(
             self.client,
             execution_state,
             execution_lock,
-            symbol
+            symbol,
+            self,
         )
         # ===== SYNC & STREAM =====
         self.sync = BinanceRestSync(self.client)
@@ -154,6 +206,73 @@ class BinanceExecutionAdapter(BaseExchangeAdapter):
         return snap.get("open_orders", [])
 
     # =====================================================
+    # PROTECTIVE ORDERS (exchange-managed SL / TP)
+    # =====================================================
+
+    async def place_stop_loss(
+        self, symbol, side, quantity, stop_price, execution_id
+    ):
+        close_side = "SELL" if side == "LONG" else "BUY"
+        self.trade.place_order(
+            execution_id=execution_id,
+            symbol=symbol,
+            side=close_side,
+            type="STOP_MARKET",
+            stopPrice=float(stop_price),
+            reduceOnly=True,
+            closePosition=False,
+            quantity=quantity,
+        )
+
+    async def place_take_profit(
+        self, symbol, side, quantity, tp_price, execution_id
+    ):
+        close_side = "SELL" if side == "LONG" else "BUY"
+        self.trade.place_order(
+            execution_id=execution_id,
+            symbol=symbol,
+            side=close_side,
+            type="TAKE_PROFIT_MARKET",
+            stopPrice=float(tp_price),
+            reduceOnly=True,
+            closePosition=False,
+            quantity=quantity,
+        )
+
+    async def _maybe_place_brackets(
+        self,
+        symbol: str,
+        position_side: str,
+        quantity: float,
+        execution_id,
+        *,
+        metadata: Optional[dict] = None,
+    ):
+        if not execution_id or quantity <= 0:
+            return
+        if metadata is None:
+            metadata = {}
+            if self.execution_state is not None and hasattr(
+                self.execution_state, "get_metadata"
+            ):
+                metadata = self.execution_state.get_metadata(execution_id)
+
+        sl = metadata.get("sl")
+        tp = metadata.get("tp")
+
+        try:
+            if sl:
+                await self.place_stop_loss(
+                    symbol, position_side, quantity, sl, execution_id
+                )
+            if tp:
+                await self.place_take_profit(
+                    symbol, position_side, quantity, tp, execution_id
+                )
+        except Exception as e:
+            print("[BRACKET_ORDER_ERROR]", e)
+
+    # =====================================================
     # ABSTRACT API IMPLEMENTATION (required by base class)
     # =====================================================
 
@@ -184,13 +303,17 @@ class BinanceExecutionAdapter(BaseExchangeAdapter):
             order_sent_time
         )
 
-        response = self.trade.place_order(
-            execution_id=local_id,
-            symbol=symbol,
-            side=binance_side,
-            type="MARKET",
-            quantity=quantity
-        )
+        self._bracket_hook_suppressed = True
+        try:
+            response = self.trade.place_order(
+                execution_id=local_id,
+                symbol=symbol,
+                side=binance_side,
+                type="MARKET",
+                quantity=quantity,
+            )
+        finally:
+            self._bracket_hook_suppressed = False
 
         # 🔥 REAL BINANCE ID
         real_id = response.get("clientOrderId")
@@ -207,6 +330,31 @@ class BinanceExecutionAdapter(BaseExchangeAdapter):
 
         filled_qty = float(response.get("executedQty", 0))
         status = response.get("status", "UNKNOWN")
+
+        metadata = {}
+        if self.execution_state is not None and hasattr(
+            self.execution_state, "get_metadata"
+        ):
+            metadata = self.execution_state.get_metadata(local_id)
+
+        sl = metadata.get("sl")
+        tp = metadata.get("tp")
+
+        if filled_qty > 0:
+            if sl:
+                try:
+                    await self.place_stop_loss(
+                        symbol, side, filled_qty, sl, local_id
+                    )
+                except Exception as e:
+                    print("[BRACKET_SL_ERROR]", e)
+            if tp:
+                try:
+                    await self.place_take_profit(
+                        symbol, side, filled_qty, tp, local_id
+                    )
+                except Exception as e:
+                    print("[BRACKET_TP_ERROR]", e)
 
         return FillResult(
             filled_quantity=filled_qty,

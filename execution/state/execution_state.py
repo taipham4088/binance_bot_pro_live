@@ -23,6 +23,8 @@ class ExecutionState:
         self.status: ExecutionStatus = ExecutionStatus.INIT
         self.reason: str | None = None
         self.since: float = time.time()
+        # Per-execution intent metadata (e.g. sl/tp from strategy) — keyed by orchestrator execution_id
+        self._intent_metadata: dict[str, dict] = {}
 
     # =========================
     # CORE
@@ -94,3 +96,16 @@ class ExecutionState:
             "since": self.since,
             "uptime": round(time.time() - self.since, 2)
         }
+
+    def set_metadata(self, execution_id: str, metadata: dict) -> None:
+        if execution_id and isinstance(metadata, dict):
+            self._intent_metadata[execution_id] = dict(metadata)
+
+    def get_metadata(self, execution_id: str) -> dict:
+        if not execution_id:
+            return {}
+        return dict(self._intent_metadata.get(execution_id, {}))
+
+    def pop_metadata(self, execution_id: str) -> None:
+        if execution_id:
+            self._intent_metadata.pop(execution_id, None)
