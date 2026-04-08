@@ -17,7 +17,10 @@ class SystemStateEngine:
     """
 
     def __init__(self, session, state_hub=None):
-        self.trade_journal = TradeJournal(mode=session.mode)
+        self.trade_journal = TradeJournal(
+            mode=session.id,
+            logical_mode=getattr(session, "api_mode", session.mode),
+        )
         self.builder = SystemStateBuilder(session_id=session.id)
         self.session = session
         self.state_hub = state_hub
@@ -46,11 +49,54 @@ class SystemStateEngine:
         self._bad_health_ticks = 0
         self._good_health_ticks = 0
         self._health_level = "OK"
+        # Measured exchange ack latency (order ack - order sent), ms; EMA for grace.
+        self._exchange_latency_ms = None
+        self._latency_ema_alpha = 0.25
+        self._latency_fallback_ms = 1500
+        self._max_latency_sample_ms = 60000
+
+    def _intent_order_sent_ms(self, intent, default_ms: int) -> int:
+        """Best available order_sent_time (ms); pipeline may set attrs on intent."""
+        for name in ("exchange_order_sent_time", "order_sent_time", "orderSentTime"):
+            v = getattr(intent, name, None)
+            if v is not None:
+                try:
+                    return int(v)
+                except (TypeError, ValueError):
+                    pass
+        v = getattr(intent, "ts", None)
+        if v is not None:
+            try:
+                return int(v)
+            except (TypeError, ValueError):
+                pass
+        return int(default_ms)
+
+    def _record_exchange_latency_ms(self, sample_ms: int) -> None:
+        if sample_ms < 0 or sample_ms > self._max_latency_sample_ms:
+            return
+        if self._exchange_latency_ms is None:
+            self._exchange_latency_ms = float(sample_ms)
+        else:
+            a = self._latency_ema_alpha
+            self._exchange_latency_ms = a * sample_ms + (1.0 - a) * self._exchange_latency_ms
+
+    def _grace_ms_position_missing(self) -> int:
+        """
+        Grace before POSITION_MISSING_AFTER_SUBMIT:
+        min(max(500, latency * 2), 3000) with latency from EMA; else fallback 1500.
+        """
+        lat = self._exchange_latency_ms
+        if lat is None:
+            return self._latency_fallback_ms
+        li = int(round(lat))
+        return min(max(500, li * 2), 3000)
 
     def on_intent_submitted(self, intent):
         self.state.setdefault("execution", {})
 
         now = int(time.time() * 1000)
+        order_sent_ms = self._intent_order_sent_ms(intent, now)
         active_intent = {
             "intentId": getattr(intent, "intent_id", None),
             "symbol": getattr(intent, "symbol", None),
@@ -59,6 +105,8 @@ class SystemStateEngine:
             "source": getattr(intent, "source", None),
             "status": "OPEN",
             "submittedAt": now,
+            "intentSubmitTime": now,
+            "orderSentTime": order_sent_ms,
         }
 
         self.state["execution"]["activeIntent"] = active_intent
@@ -114,7 +162,46 @@ class SystemStateEngine:
         # market mode (analytics)
         if hasattr(self.session, "market_mode_engine"):
             self.session.market_mode_engine.subscribe(self.on_market_mode)
-        
+
+        # ---- analytics: session-scoped bus routing + restore resolver ----
+        try:
+            from backend.analytics.session_publish_context import (
+                register_sync_engine_session,
+                register_stub_execution_session,
+            )
+            from backend.observability.session_journal_registry import (
+                register_trade_journal,
+            )
+
+            register_trade_journal(self.session.id, self.trade_journal)
+
+            ls = getattr(self.session, "live_system", None)
+            eng = getattr(self.session, "engine", None)
+
+            if ls and getattr(ls, "sync_engine", None):
+                se = ls.sync_engine
+                register_sync_engine_session(se, self.session.id)
+
+                def _journal_restore_resolver(symbol: str):
+                    if not getattr(se, "_bootstrapped", False):
+                        return None
+                    min_sz = se._get_symbol_min_size(symbol)
+                    for p in se.position.get_all():
+                        if p.symbol == symbol:
+                            sz = abs(float(p.size))
+                            if sz > min_sz * 0.5:
+                                return {"side": p.side, "size": sz}
+                            return False
+                    return False
+
+                self.trade_journal.set_exchange_position_resolver(
+                    _journal_restore_resolver
+                )
+            elif eng is not None and type(eng).__name__ == "StubExecution":
+                register_stub_execution_session(eng, self.session.id)
+        except Exception as e:
+            print("[STATE_ENGINE] session analytics bridge:", e)
+
     # =====================================================
 
     def start_heartbeat(self):
@@ -412,6 +499,11 @@ class SystemStateEngine:
                 print("SYNC ENGINE NOT FOUND")
                 self.state["execution"]["positions"] = []
 
+        try:
+            self.trade_journal._resolve_pending_restore()
+        except Exception:
+            pass
+
         self._reconcile_intent_state()
     # =====================================================
     # EXECUTION DECISION (PHASE 3.4)
@@ -457,6 +549,14 @@ class SystemStateEngine:
             self.state["execution"]["pendingSymbol"] = symbol
             self.state["execution"]["pendingSide"] = side
             self.state["execution"]["pendingSize"] = size
+
+            # Latency sample: exchange_ack_time (event.ts) - order_sent_time
+            if current_active_intent and event.ts is not None:
+                sent = current_active_intent.get("orderSentTime")
+                if sent is not None:
+                    lat = int(event.ts) - int(sent)
+                    if lat >= 0:
+                        self._record_exchange_latency_ms(lat)
 
         # -------------------------------------------------
         # CLOSED → remove position by symbol
@@ -526,6 +626,16 @@ class SystemStateEngine:
                 break
 
         if matching_position is None:
+            t0 = active_intent.get("orderSentTime")
+            if t0 is None:
+                t0 = active_intent.get("intentSubmitTime")
+            if t0 is None:
+                t0 = active_intent.get("submittedAt")
+            if t0 is not None:
+                elapsed_ms = int(time.time() * 1000) - int(t0)
+                grace_ms = self._grace_ms_position_missing()
+                if elapsed_ms < grace_ms:
+                    return
             resolved_intent = dict(active_intent)
             resolved_intent["status"] = "INVALIDATED"
             resolved_intent["resolvedAt"] = int(time.time() * 1000)

@@ -8,7 +8,6 @@ from backend.storage.mode_storage import mode_storage
 
 
 class TradeJournal:
-    _restore_done = False
     # Opposite-side: treat near-equal sizes as full close (avoid Case 2 reverse on float drift)
     REVERSE_FULL_CLOSE_EPS = 1e-6
     TRADE_SIZE_ROUND_DECIMALS = 8
@@ -19,13 +18,18 @@ class TradeJournal:
     EXECUTION is not handled here — analytics_bus sends it to ExecutionMonitor only.
     """
 
-    def __init__(self, mode="shadow"):
-
+    def __init__(self, mode="shadow", logical_mode=None):
+        """
+        mode: storage bucket (e.g. session id: live, live_shadow) — isolates DB/open_trade per session.
+        logical_mode: persisted trade.mode / restore match (e.g. api_mode: live vs live_shadow).
+        """
         self.mode = mode
+        self.logical_mode = logical_mode if logical_mode is not None else mode
         self.db_path = mode_storage.get_trade_path(mode)
 
         self.conn = None
         self.current_trade = None
+        self._restore_done = False
         self._lock = threading.Lock()
         self._close_dedupe_ttl = 0.35
         self._last_close_mono = 0.0
@@ -87,9 +91,16 @@ class TradeJournal:
 
         self.current_trade = pending
         self._pending_restore_trade = None
-        if not TradeJournal._restore_done:
-            TradeJournal._restore_done = True
-            print("♻ RESTORE OPEN TRADE:", self.current_trade)
+        if not self._restore_done:
+            self._restore_done = True
+            print(
+                "♻ RESTORE OPEN TRADE:",
+                self.current_trade,
+                "journal_storage=",
+                self.mode,
+                "logical_mode=",
+                self.logical_mode,
+            )
 
     @staticmethod
     def _trade_client_order_id(data: dict):
@@ -203,7 +214,8 @@ class TradeJournal:
                     side=data["side"],
                     price=data["price"],
                     size=data["size"],
-                    fee=data.get("fee", 0)
+                    fee=data.get("fee", 0),
+                    strategy=data.get("strategy"),
                 )
 
             elif event_type == "POSITION_CLOSE":
@@ -248,7 +260,8 @@ class TradeJournal:
                     side=side,
                     price=price,
                     size=size,
-                    fee=fee
+                    fee=fee,
+                    strategy=data.get("strategy"),
                 )
                 self._seed_open_fill_ctx(data.get("symbol"), data)
                 return
@@ -298,6 +311,7 @@ class TradeJournal:
                             price=price,
                             size=incoming_size,
                             fee=fee,
+                            strategy=data.get("strategy"),
                         )
                         self._seed_open_fill_ctx(data.get("symbol"), data)
                         return
@@ -321,7 +335,8 @@ class TradeJournal:
                         side=side,
                         price=price,
                         size=remaining,
-                        fee=fee
+                        fee=fee,
+                        strategy=data.get("strategy"),
                     )
                     self._seed_open_fill_ctx(data.get("symbol"), data)
 
@@ -381,7 +396,7 @@ class TradeJournal:
 
     def _restore_current_trade(self, force=False):
 
-        if not force and TradeJournal._restore_done:
+        if not force and self._restore_done:
             return
 
         try:
@@ -392,6 +407,20 @@ class TradeJournal:
 
             with open(path, "r") as f:
                 loaded = json.load(f)
+
+            file_mode = loaded.get("mode")
+            logical = self.logical_mode
+            if file_mode is not None and logical is not None and str(file_mode) != str(logical):
+                print(
+                    "SKIP RESTORE open_trade: trade.mode=",
+                    repr(file_mode),
+                    "!= journal logical_mode=",
+                    repr(logical),
+                    "(storage=",
+                    self.mode,
+                    ")",
+                )
+                return
 
             # Startup-safe: keep as pending until exchange truth confirms position exists.
             self._pending_restore_trade = loaded
@@ -457,7 +486,7 @@ class TradeJournal:
 
         self.conn.commit()
 
-    def on_position_open(self, symbol, side, price, size, fee=0):
+    def on_position_open(self, symbol, side, price, size, fee=0, strategy=None):
 
         if price == 0:
             print("⚠ IGNORE INVALID OPEN (price=0)")
@@ -470,9 +499,9 @@ class TradeJournal:
         print("✅ OPEN SAVED:", price, size, side)
 
         self.current_trade = {
-            "mode": self.mode,
+            "mode": self.logical_mode,
             "symbol": symbol,
-            "strategy": "default",
+            "strategy": strategy or "default",
             "side": side,
             "entry_time": int(time.time()),
             "entry_price": price,

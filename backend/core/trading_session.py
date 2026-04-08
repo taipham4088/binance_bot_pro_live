@@ -13,6 +13,28 @@ from execution.orchestrator.orchestrator import ExecutionOrchestrator
 print("🔥 SESSION FILE:", __file__)
 
 
+def canonical_session_id(mode: str) -> str:
+    """Stable API id for /session/start/{id} and WS paths."""
+    m = str(mode or "").strip().lower().replace("-", "_")
+    if m == "live":
+        return "live"
+    if m == "shadow":
+        return "shadow"
+    if m == "live_shadow":
+        return "live_shadow"
+    if m == "backtest":
+        return "backtest"
+    if m == "paper":
+        return "paper"
+    return "paper"
+
+
+def mode_defers_execution_bootstrap(mode: str) -> bool:
+    """Shadow / live modes: build execution stack on start(), not on create."""
+    m = str(mode or "").strip().lower().replace("-", "_")
+    return m in ("shadow", "live", "live_shadow")
+
+
 class TradingSession:
     """
     App Host Kernel
@@ -27,9 +49,20 @@ class TradingSession:
     STATUS_STOPPED = "STOPPED"
     STATUS_ERROR = "ERROR"
 
-    def __init__(self, mode, config, app=None):
-        # ---- identity ----
-        self.mode = mode
+    def __init__(
+        self,
+        mode,
+        config,
+        app=None,
+        session_id: str | None = None,
+        defer_execution: bool | None = None,
+    ):
+        # ---- identity (api_mode = control-plane name; mode = execution factory name) ----
+        raw = str(mode or "").strip().lower().replace("-", "_")
+        self.api_mode = raw
+        self.mode = raw
+        if raw == "live_shadow":
+            self.mode = "shadow"
         self.config = config or {}
         # ---- runtime risk config ----
         if isinstance(self.config, dict):
@@ -56,8 +89,12 @@ class TradingSession:
             self.max_positions = getattr(self.config, "max_positions", 1)
 
 
-        # 🔒 session id: ưu tiên config.id (ví dụ: live_shadow)
-        self.id = "live_shadow" if mode == "shadow" else "paper"
+        if session_id is not None:
+            self.id = str(session_id)
+        elif isinstance(self.config, dict) and self.config.get("id"):
+            self.id = str(self.config["id"])
+        else:
+            self.id = canonical_session_id(mode)
 
         self.app = app
         self.created_at = datetime.utcnow()
@@ -77,97 +114,24 @@ class TradingSession:
         self.strategy_router = StrategyRouter()
         
         # ---- system core ----
-        self.engine = None
-        from backend.execution.execution_factory import ExecutionFactory
-        self.executor = ExecutionFactory.build(self)
-        # ===== Execution dependencies (PHẢI ĐẶT TRƯỚC) =====
-        from execution.system.execution_window import ExecutionWindow
-        from backend.core.persistence.execution_journal import ExecutionJournal
+        self._execution_attached = False
+        if defer_execution is None:
+            defer_execution = mode_defers_execution_bootstrap(mode)
+        self._defer_execution_build = defer_execution
 
-        self.execution_window = ExecutionWindow()
-        self.execution_journal = ExecutionJournal()
-        self.execution_orchestrator = ExecutionOrchestrator(
-            execution_system=self.live_system,
-            execution_state=self.live_system.execution_state,
-            execution_lock=self.live_system.execution_lock,
-            execution_window=self.execution_window,
-            journal=self.execution_journal,
-        )
-
-        from trading_core.engines.dual_engine import DualEngine
-        from trading_core.runtime.context import RuntimeContext
-
-        context = RuntimeContext(self.config)
-
-        # create strategy account
-        class StrategyAccount:
-
-            def __init__(self, balance=10000):
-                self.balance = balance
-
-            def get_balance(self):
-                return self.balance
-
-            def get_equity(self):
-                return self.balance
-
-            def get_state(self):
-                class State:
-                    current_day = None
-                    blocked_until = None
-                    daily_loss_count = 0
-                return State()
-
-            def register_loss(self, v):
-                self.balance -= v
-
-            def register_win(self, v):
-                self.balance += v
-
-            def reset_day(self, day):
-                pass
-
-            def daily_dd(self):
-                return 0
-                
-        # 🔥 TẠO ACCOUNT INSTANCE
-        self.strategy_account = StrategyAccount()
-
-        self.strategy_engine = DualEngine(
-            config=self.config,
-            context=context,
-            market=None,
-            execution=self.executor,
-            account=self.strategy_account
-        )
-        # orchestrator
-        self.engine = self.executor
-        # live execution system (real executor)
-        self.live_system = getattr(self.executor, "execution_system", None)
-        
-        if self.live_system is None:
-            raise Exception("❌ execution_system not attached to executor")
-
-        # 🔥 Treat executor as engine (live execution system)
-        self.engine = self.live_system
-        print("ENGINE TYPE AT INIT:", type(self.engine))
-
-        if hasattr(self.engine, "execution_state"):
-            self.system_state.execution_state = self.engine.execution_state
-            self.engine.execution_state.on_change = self.system_state._on_execution_state_change
-            print("✅ Execution state listener attached (correct object)")
-            
-
-        def _noop_candle(i, row, df):
-            pass
-
-        if isinstance(self.config, dict):
-            symbol = self.config.get("symbol", "BTCUSDT")
+        if not self._defer_execution_build:
+            self._attach_execution_stack()
         else:
-            symbol = getattr(self.config, "symbol", "BTCUSDT")
-        
-        self.data_feed = None
-        self.runner = None
+            self.executor = None
+            self.live_system = None
+            self.engine = None
+            self.strategy_engine = None
+            self.execution_window = None
+            self.execution_journal = None
+            self.execution_orchestrator = None
+            self.data_feed = None
+            self.runner = None
+
         self.risk_system = ReadOnlyRiskSystem(
             session_id=self.id,
             mode=self.mode
@@ -195,10 +159,96 @@ class TradingSession:
             "[SESSION][INIT]",
             "id=", self.id,
             "mode=", self.mode,
-            "has_recon=", hasattr(self, "reconciliation_hub")
+            "execution_deferred=", self._defer_execution_build,
+            "has_recon=", hasattr(self, "reconciliation_hub"),
         )
 
-        
+    def _attach_execution_stack(self):
+        if self._execution_attached:
+            return
+        from backend.execution.execution_factory import ExecutionFactory
+        from execution.system.execution_window import ExecutionWindow
+        from backend.core.persistence.execution_journal import ExecutionJournal
+        from trading_core.engines.dual_engine import DualEngine
+        from trading_core.runtime.context import RuntimeContext
+
+        self.executor = ExecutionFactory.build(self)
+
+        self.execution_window = ExecutionWindow()
+        self.execution_journal = ExecutionJournal()
+        self.execution_orchestrator = ExecutionOrchestrator(
+            execution_system=self.live_system,
+            execution_state=self.live_system.execution_state,
+            execution_lock=self.live_system.execution_lock,
+            execution_window=self.execution_window,
+            journal=self.execution_journal,
+        )
+
+        context = RuntimeContext(self.config)
+
+        class StrategyAccount:
+
+            def __init__(self, balance=10000):
+                self.balance = balance
+
+            def get_balance(self):
+                return self.balance
+
+            def get_equity(self):
+                return self.balance
+
+            def get_state(self):
+                class State:
+                    current_day = None
+                    blocked_until = None
+                    daily_loss_count = 0
+
+                return State()
+
+            def register_loss(self, v):
+                self.balance -= v
+
+            def register_win(self, v):
+                self.balance += v
+
+            def reset_day(self, day):
+                pass
+
+            def daily_dd(self):
+                return 0
+
+        self.strategy_account = StrategyAccount()
+
+        self.strategy_engine = DualEngine(
+            config=self.config,
+            context=context,
+            market=None,
+            execution=self.executor,
+            account=self.strategy_account,
+        )
+        self.engine = self.executor
+        self.live_system = getattr(self.executor, "execution_system", None)
+
+        if self.live_system is None:
+            raise Exception("❌ execution_system not attached to executor")
+
+        self.engine = self.live_system
+        print("ENGINE TYPE AT INIT:", type(self.engine))
+
+        if hasattr(self.engine, "execution_state"):
+            self.system_state.execution_state = self.engine.execution_state
+            self.engine.execution_state.on_change = self.system_state._on_execution_state_change
+            print("✅ Execution state listener attached (correct object)")
+
+        self.data_feed = None
+        self.runner = None
+        self._execution_attached = True
+        print(
+            "[SESSION][EXEC_STACK]",
+            "id=", self.id,
+            "mode=", self.mode,
+        )
+
     # =========================================================
     # lifecycle
     # =========================================================
@@ -234,6 +284,9 @@ class TradingSession:
                 raise RuntimeError(
                     f"Cannot start session from state {self.status}"
                 )
+
+            if not self._execution_attached:
+                self._attach_execution_stack()
 
             # 1️⃣ SET STATUS
             self.status = self.STATUS_RUNNING
@@ -422,6 +475,10 @@ class TradingSession:
     # =====================================================
     async def inject_intent(self, intent):
         import asyncio
+        if self.execution_orchestrator is None:
+            raise RuntimeError(
+                "Session execution stack not started (start_session required)"
+            )
         await asyncio.sleep(0.3)
         pos = None
 

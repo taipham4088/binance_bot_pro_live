@@ -28,6 +28,7 @@ from backend.api.routes_execution_monitor import router as execution_router
 from backend.observability.execution_recorder import init_db
 from backend.analytics.analytics_bus import analytics_bus
 from backend.observability.execution_monitor_instance import execution_monitor
+from backend.runtime.runtime_config import runtime_config, runtime_config_path
 #analytics_bus.subscribe(trade_journal)
 app = FastAPI(title="binance_bot_pro_live")
 from backend.api.backtest import router as backtest_router
@@ -91,6 +92,12 @@ def health():
 
 @app.on_event("startup")
 async def startup():
+
+    print(
+        "[runtime_config] loaded control panel:",
+        {k: runtime_config[k] for k in ("strategy", "trade_mode", "trading_enabled", "symbol", "mode", "exchange")},
+        f"file={runtime_config_path()}",
+    )
 
     await alert_engine_instance.start()
 

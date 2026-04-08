@@ -17,6 +17,10 @@ class StrategyHost:
             "strategy",
             getattr(config, "engine", "dual_engine")
         )
+        symbol = (
+            getattr(config, "symbol", None)
+            or runtime_config.get("symbol", "BTCUSDT")
+        )
 
         engine = engine_registry.create_engine(
             engine_type,

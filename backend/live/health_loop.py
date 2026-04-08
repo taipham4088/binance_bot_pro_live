@@ -1,5 +1,5 @@
 # backend/live/health_loop.py
-from backend.execution.state.execution_state import ExecutionStatus
+from execution.state.execution_state import ExecutionStatus
 import asyncio
 import time
 from backend.observability.health_metrics import record_heartbeat

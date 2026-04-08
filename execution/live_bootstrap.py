@@ -22,7 +22,27 @@ from execution.adapter.exchange_factory import create_exchange_adapter
 from backend.observability.execution_monitor_instance import trade_journal
 
 
-def build_live_execution_system(config, event_bus, logger):
+_CANONICAL_SESSION_KEYS = frozenset(
+    {"live", "shadow", "live_shadow", "backtest", "paper"}
+)
+
+
+def _session_meta_file(persistence_key: str) -> Path:
+    base = Path("data/session_meta")
+    base.mkdir(parents=True, exist_ok=True)
+    safe = str(persistence_key or "default").strip() or "default"
+    for ch in ("/", "\\", ".."):
+        safe = safe.replace(ch, "_")
+    return base / f"{safe}.json"
+
+
+def build_live_execution_system(config, event_bus, logger, persistence_key=None):
+    """
+    persistence_key: trading session id (live / shadow / live_shadow / …).
+    Isolates recovery session_id meta so live never reuses shadow bootstrap state.
+    """
+    bucket = (persistence_key or "default").strip() or "default"
+    SESSION_FILE = _session_meta_file(bucket)
 
     # 0. Execution event system
     exec_event_bus = ExecutionEventBus()
@@ -35,20 +55,21 @@ def build_live_execution_system(config, event_bus, logger):
     execution_journal = ExecutionJournal()
 
     # ==========================================================
-    # 🔐 SESSION PERSISTENCE
+    # SESSION PERSISTENCE (per trading session / mode bucket)
     # ==========================================================
-    SESSION_FILE = Path("session.meta")
-
     if SESSION_FILE.exists():
-        with open(SESSION_FILE, "r") as f:
+        with open(SESSION_FILE, "r", encoding="utf-8") as f:
             data = json.load(f)
             session_id = data.get("session_id")
-            print(f"[BOOTSTRAP] Reusing session_id: {session_id}")
+        print(f"[BOOTSTRAP] bucket={bucket!r} reusing session_id: {session_id}")
     else:
-        session_id = f"shadow-{int(time.time())}-{uuid.uuid4().hex[:6]}"
-        with open(SESSION_FILE, "w") as f:
-            json.dump({"session_id": session_id}, f)
-        print(f"[BOOTSTRAP] Created new session_id: {session_id}")
+        if bucket in _CANONICAL_SESSION_KEYS:
+            session_id = bucket
+        else:
+            session_id = f"{bucket}-{int(time.time())}-{uuid.uuid4().hex[:6]}"
+        with open(SESSION_FILE, "w", encoding="utf-8") as f:
+            json.dump({"session_id": session_id, "bucket": bucket}, f)
+        print(f"[BOOTSTRAP] bucket={bucket!r} created session_id: {session_id}")
 
     # ==========================================================
     # 1. CORE SYSTEM

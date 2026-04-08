@@ -3,7 +3,7 @@ logger = logging.getLogger("LIVE")
 from execution.live_bootstrap import build_live_execution_system
 from backend.adapters.market.binance_market_adapter import BinanceMarketAdapter
 from backend.adapters.account.dummy_account_adapter import DummyAccountAdapter
-from backend.execution.mode_router import ModeRouter
+from execution.mode_router import ModeRouter
 from backend.runtime.live_runner import LiveRunner
 from backend.core.strategy_host import StrategyHost
 from backend.live.health_loop import HealthLoop
@@ -14,13 +14,20 @@ class LiveService:
         self.host = StrategyHost()
 
     def start(self, session, symbol: str, timeframe: str):
+        # Idempotency guard: avoid duplicate runner/market wiring per session.
+        if getattr(session, "runner", None) and session.runner.is_alive():
+            return session.id
 
-        # ===== execution system (STEP 4 + STEP 5) =====
-        live_system = build_live_execution_system(
-            config=session.config,
-            event_bus=session.state_bus,
-            logger=logger
-        )
+        # Reuse execution stack created by TradingSession.start(); never build a second one.
+        live_system = getattr(session, "live_system", None)
+        if live_system is None:
+            live_system = build_live_execution_system(
+                config=session.config,
+                event_bus=session.state_bus,
+                logger=logger,
+                persistence_key=session.id,
+            )
+            session.live_system = live_system
         # ===== HEALTH LOOP =====
         health_loop = HealthLoop(
             state_engine=session.system_state,   # ✅ đúng engine
@@ -35,8 +42,10 @@ class LiveService:
 
         orchestrator = live_system.orchestrator
         session.live_system = live_system
-        
-        loop.create_task(live_system.start())
+        # TradingSession.start already starts the execution system.
+        # If this path is invoked before that, start once safely.
+        if not getattr(live_system, "running", False):
+            loop.create_task(live_system.start())
 
         # ===== live ports =====
         market = BinanceMarketAdapter(symbol, timeframe)
@@ -53,8 +62,7 @@ class LiveService:
         session.execution = execution
         session.account = account
 
-        # start market feed first
-        loop.create_task(market.start())
+        # BinanceMarketAdapter has no async start(); feed starts when runner subscribes.
 
         # small delay to ensure websocket connected
         import time

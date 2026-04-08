@@ -3,6 +3,72 @@ let equityChart = null
 let equityHistory = []
 let controlInitialized = false
 
+/** True only after server config merged into lastApplied + DOM selects hydrated (avoids Ctrl+F5 all-blue). */
+let controlPanelBaselineReady = false
+
+/** After Apply, one dashboard refresh can carry stale config and repaint pending (blue) over green flash. */
+let skipNextControlPanelRefresh = false
+
+/** Server-backed values for control rows; pending UI = select/input value !== last applied */
+const lastAppliedControlValues = {}
+
+function markControlApplyCommitted(elementId, value) {
+  skipNextControlPanelRefresh = true
+  lastAppliedControlValues[elementId] = String(value)
+}
+
+function syncControlLastAppliedFromConfig(config) {
+  if (!config) return
+  const pairs = [
+    ["trade_mode_select", "trade_mode"],
+    ["trading_mode_select", "mode"],
+    ["strategy_select", "strategy"],
+    ["exchange_select", "exchange"],
+    ["symbol_select", "symbol"],
+    ["risk_input", "risk_percent"],
+  ]
+  for (const [elementId, configKey] of pairs) {
+    const v = config[configKey]
+    if (configKey === "risk_percent") {
+      if (v !== undefined && v !== null && !Number.isNaN(Number(v))) {
+        lastAppliedControlValues[elementId] = String(v)
+      }
+      continue
+    }
+    if (v !== undefined && v !== null && v !== "") {
+      lastAppliedControlValues[elementId] = String(v)
+    }
+  }
+}
+
+const CONTROL_APPLY_IDS = [
+  "symbol_select",
+  "exchange_select",
+  "risk_input",
+  "trade_mode_select",
+  "trading_mode_select",
+  "strategy_select",
+]
+
+function refreshControlApplyButtonStates() {
+  if (!controlPanelBaselineReady) return
+  if (skipNextControlPanelRefresh) {
+    skipNextControlPanelRefresh = false
+    return
+  }
+  for (const id of CONTROL_APPLY_IDS) {
+    pendingButton(id)
+  }
+}
+
+function applySymbolSelectFromBaseline() {
+  const desired = lastAppliedControlValues["symbol_select"]
+  const select = document.getElementById("symbol_select")
+  if (!desired || !select || !select.options.length) return
+  const has = Array.from(select.options).some((o) => o.value === desired)
+  if (has) select.value = desired
+}
+
 document.addEventListener("DOMContentLoaded", function(){
 
   // INIT GRIDSTACK
@@ -24,11 +90,11 @@ document.addEventListener("DOMContentLoaded", function(){
     localStorage.setItem("gridstack-layout", JSON.stringify(layout))
   })
 
-  // LOAD CONTROL DATA
-  loadSymbols()
-
-  // DATA LOAD (POLLING)
-  loadDashboard()
+  // Symbol list must exist before hydrating from /api/dashboard (avoids race → false “pending”).
+  ;(async function bootstrapDashboardControlPanel() {
+    await loadSymbols()
+    await loadDashboard()
+  })()
 
   // nếu bạn CHƯA chuyển hẳn sang WebSocket thì giữ polling
   setInterval(loadDashboard,3000)
@@ -111,6 +177,8 @@ updateStrategy(data)
 updateMarketBias(data)
 // Restore Pause / Resume
 if(data.config){
+
+syncControlLastAppliedFromConfig(data.config)
 
 const paused = data.config.trading_enabled === false
 
@@ -206,8 +274,9 @@ document.querySelector("#symbol_select")
 
 }
 
-// Risk
-if(data.config.risk_percent){
+// Risk (0 is valid — do not use truthy check)
+if(data.config.risk_percent !== undefined && data.config.risk_percent !== null
+&& !Number.isNaN(Number(data.config.risk_percent))){
 
 document.getElementById("risk_input").value =
 data.config.risk_percent
@@ -219,7 +288,17 @@ document.querySelector("#risk_input")
 )
 
 }
+
+applySymbolSelectFromBaseline()
+
 controlInitialized = true
+controlPanelBaselineReady = true
+refreshControlApplyButtonStates()
+
+} else if (data.config && controlInitialized && controlPanelBaselineReady) {
+
+refreshControlApplyButtonStates()
+
 }
 //updatePerformance(data)
 
@@ -939,6 +1018,8 @@ console.log("symbol load error",e)
 
 }
 
+applySymbolSelectFromBaseline()
+
 }
 
 function filterSymbols(){
@@ -1245,6 +1326,8 @@ headers:{
 body:JSON.stringify({exchange})
 })
 
+markControlApplyCommitted("exchange_select", exchange)
+
 flashButton(btn)
 
 }catch(e){
@@ -1320,6 +1403,8 @@ headers:{
 body:JSON.stringify({risk:parseFloat(risk)})
 })
 
+markControlApplyCommitted("risk_input", risk)
+
 flashButton(btn)
 
 }catch(e){
@@ -1344,6 +1429,8 @@ headers:{
 },
 body:JSON.stringify({mode})
 })
+
+markControlApplyCommitted("trade_mode_select", mode)
 
 flashButton(btn)
 
@@ -1370,6 +1457,8 @@ headers:{
 body:JSON.stringify({mode})
 })
 
+markControlApplyCommitted("trading_mode_select", mode)
+
 flashButton(btn)
 
 }catch(e){
@@ -1395,6 +1484,8 @@ headers:{
 body:JSON.stringify({strategy})
 })
 
+markControlApplyCommitted("strategy_select", strategy)
+
 flashButton(btn)
 
 }catch(e){
@@ -1419,6 +1510,8 @@ headers:{
 },
 body:JSON.stringify({symbol})
 })
+
+markControlApplyCommitted("symbol_select", symbol)
 
 flashButton(btn)
 
@@ -1456,7 +1549,27 @@ const button = select
 .closest(".control-row")
 .querySelector("button")
 
+if(!button) return
+
+if(!controlPanelBaselineReady){
+button.style.backgroundColor = ""
+button.style.color = ""
+return
+}
+
+const last = lastAppliedControlValues[selectId]
+const current = String(select.value)
+
+if(last !== undefined && current !== last){
+
 button.style.backgroundColor = "#3b82f6"
 button.style.color = "#fff"
+
+}else{
+
+button.style.backgroundColor = ""
+button.style.color = ""
+
+}
 
 }

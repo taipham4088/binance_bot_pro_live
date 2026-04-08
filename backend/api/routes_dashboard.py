@@ -107,12 +107,27 @@ async def dashboard_v7():
     )
 
 @router.get("/api/trades/history")
-async def get_trade_history(mode="shadow"):
+async def get_trade_history(
+    request: Request,
+    session_id: str | None = None,
+    mode: str | None = None,
+):
 
     import sqlite3
     from backend.storage.mode_storage import mode_storage
 
-    db_path = mode_storage.get_trade_path(mode)
+    key = session_id or mode
+    if not key:
+        manager = request.app.state.manager
+        if manager.sessions:
+            if getattr(manager, "active_session_id", None) in manager.sessions:
+                key = manager.active_session_id
+            else:
+                key = next(iter(manager.sessions.keys()))
+        else:
+            key = "shadow"
+
+    db_path = mode_storage.get_trade_path(key)
 
     conn = sqlite3.connect(db_path)
     cursor = conn.cursor()

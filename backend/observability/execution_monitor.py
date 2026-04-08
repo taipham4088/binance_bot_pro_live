@@ -1,8 +1,34 @@
+import threading
 import time
-from backend.observability.execution_recorder import record_execution
-from dataclasses import dataclass, field
-from typing import Optional, Dict
 from collections import deque
+from dataclasses import dataclass, field
+from typing import Dict, Optional
+
+from backend.analytics.session_publish_context import resolve_session_id_from_call_stack
+from backend.observability.execution_recorder import init_db, record_execution
+from backend.storage.mode_storage import mode_storage
+
+_ensure_execution_db_lock = threading.Lock()
+_initialized_execution_db_paths: set[str] = set()
+
+
+def _ensure_execution_history_schema(mode: str) -> None:
+    """
+    Ensure per-session execution.db exists under data/<session_id>/execution.db
+    with execution_history table (same layout as execution_recorder.init_db / record_execution).
+    """
+    db_path = mode_storage.get_execution_path(mode)
+    with _ensure_execution_db_lock:
+        if db_path in _initialized_execution_db_paths:
+            return
+
+    init_db(mode)
+
+    with _ensure_execution_db_lock:
+        if db_path in _initialized_execution_db_paths:
+            return
+        _initialized_execution_db_paths.add(db_path)
+        print(f"[ExecutionMonitor] schema initialized for session: {mode}")
 
 
 @dataclass
@@ -21,6 +47,7 @@ class ExecutionTrace:
 
     fill_price: Optional[float] = None
     fee: Optional[float] = None
+    strategy: Optional[str] = None
 
     def mark_order_sent(self):
         self.order_sent_time = time.time()
@@ -185,6 +212,7 @@ class ExecutionMonitor:
             signal_price=event.get("signal_price"),
             signal_time=event.get("signal_time", time.time()),
             fee=fee_val,
+            strategy=event.get("strategy"),
         )
         self.last_trace = trace
         # update optional timestamps
@@ -212,7 +240,10 @@ class ExecutionMonitor:
 
         if data and data.get("fill_price") is not None:
             self.history.append(data)
-            record_execution(data)
+            sid = resolve_session_id_from_call_stack()
+            mode = sid if sid else "shadow"
+            _ensure_execution_history_schema(mode)
+            record_execution(data, mode=mode)
 
     
     def handle_trade(self, data: dict):
@@ -260,6 +291,8 @@ class ExecutionMonitor:
             "signal_price": signal_price,
             "fill_price": t.fill_price,
             "fee": t.fee,
+
+            "strategy": t.strategy,
 
             "slippage": slippage,
 

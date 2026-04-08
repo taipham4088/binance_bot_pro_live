@@ -22,8 +22,8 @@ class LiveRunner(threading.Thread):
         engine = self.session.strategy_engine
         bus = self.session.state_bus
 
-        # 🔥 bind state_engine into session for execution propagation
-        self.session.state_engine = self.session.app.state.state_engine
+        # Bind per-session state engine (avoid global app.state dependency).
+        self.session.state_engine = getattr(self.session, "system_state", None)
 
         
         def on_candle(i, row, df):

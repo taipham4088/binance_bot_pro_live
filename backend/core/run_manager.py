@@ -45,8 +45,21 @@ class RunManager:
     # lifecycle
     # =====================================================
 
-    def create_session(self, mode, config, app=None) -> TradingSession:
-        session = TradingSession(mode=mode, config=config, app=app)
+    def create_session(
+        self,
+        mode,
+        config,
+        app=None,
+        session_id: str | None = None,
+        defer_execution: bool | None = None,
+    ) -> TradingSession:
+        session = TradingSession(
+            mode=mode,
+            config=config,
+            app=app,
+            session_id=session_id,
+            defer_execution=defer_execution,
+        )
 
         # 🔥 PHASE 3.2 – ATTACH ENGINE ĐÚNG
         session.state_engine = session.system_state

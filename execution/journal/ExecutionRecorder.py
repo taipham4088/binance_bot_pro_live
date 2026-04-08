@@ -1,10 +1,13 @@
 from collections import deque
 
+from backend.runtime.runtime_config import runtime_config
+
 
 class ExecutionRecord:
     def __init__(self, execution_id, intent=None):
         self.execution_id = execution_id
         self.intent = intent
+        self.strategy = runtime_config.get("strategy")
         self.start_ts = None
         self.end_ts = None
         self.status = "RUNNING"
@@ -21,6 +24,7 @@ class ExecutionRecord:
         return {
             "execution_id": self.execution_id,
             "intent": str(self.intent),
+            "strategy": self.strategy,
             "start_ts": self.start_ts,
             "end_ts": self.end_ts,
             "status": self.status,

@@ -26,11 +26,19 @@ async def ws_intent(websocket: WebSocket, session_id: str):
             intent_id = raw_msg.get("intent_id") or str(uuid4())
             payload = raw_msg.get("payload", {})
 
+            from backend.runtime.runtime_config import runtime_config
+
+            ps = (payload.get("symbol") or "").strip().upper()
+            rs = (runtime_config.get("symbol") or "").strip().upper()
+            if ps and rs and ps != rs:
+                print(
+                    f"WARNING: manual symbol override intent={intent_id} "
+                    f"payload={ps} runtime_config={rs}"
+                )
+
             # =========================
             # TRADE MODE GUARD
             # =========================
-
-            from backend.runtime.runtime_config import runtime_config
 
             trade_mode = runtime_config.get("trade_mode", "both")
             side = payload.get("side")
@@ -100,8 +108,6 @@ async def ws_intent(websocket: WebSocket, session_id: str):
             # =========================
             # TRADING ENABLE CHECK
             # =========================
-
-            from backend.runtime.runtime_config import runtime_config
 
             if not runtime_config.get("trading_enabled", True):
                 print("[CONTROL] Trading paused — intent blocked")

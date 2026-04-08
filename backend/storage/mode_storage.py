@@ -30,7 +30,11 @@ class ModeStorage:
 
     def get_trade_path(self, mode):
 
-        folder = self.paths.get(mode, self.paths["shadow"])
+        key = mode if mode is not None else "shadow"
+        folder = self.paths.get(key)
+        if folder is None:
+            folder = os.path.join(self.base, str(key))
+            os.makedirs(folder, exist_ok=True)
 
         return os.path.join(folder, "trades.db")
 
@@ -40,7 +44,11 @@ class ModeStorage:
 
     def get_execution_path(self, mode):
 
-        folder = self.paths.get(mode, self.paths["shadow"])
+        key = mode if mode is not None else "shadow"
+        folder = self.paths.get(key)
+        if folder is None:
+            folder = os.path.join(self.base, str(key))
+            os.makedirs(folder, exist_ok=True)
 
         return os.path.join(folder, "execution.db")
 
@@ -50,7 +58,11 @@ class ModeStorage:
 
     def get_event_path(self, mode):
 
-        folder = self.paths.get(mode, self.paths["shadow"])
+        key = mode if mode is not None else "shadow"
+        folder = self.paths.get(key)
+        if folder is None:
+            folder = os.path.join(self.base, str(key))
+            os.makedirs(folder, exist_ok=True)
 
         return os.path.join(folder, "events.log")
 

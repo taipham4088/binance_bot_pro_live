@@ -74,8 +74,11 @@ def execution_history(mode: str | None = None):
             sessions = manager.sessions
 
             if sessions:
-                session = list(sessions.values())[0]
-                mode = session.mode
+                if getattr(manager, "active_session_id", None) in sessions:
+                    session = sessions[manager.active_session_id]
+                else:
+                    session = list(sessions.values())[0]
+                mode = getattr(session, "id", None) or session.mode
             else:
                 mode = "shadow"
 

@@ -177,6 +177,30 @@ class DashboardCache:
             return 0.0
 
     # -------------------------
+    # Trades (session-scoped)
+    # -------------------------
+
+    def _get_recent_trades_for_dashboard(self):
+        try:
+            manager = self.app_state.manager
+            aid = getattr(manager, "active_session_id", None)
+            if aid and aid in manager.sessions:
+                j = getattr(
+                    manager.sessions[aid].system_state, "trade_journal", None
+                )
+                if j:
+                    return j.get_last_trades(200)
+            for s in manager.sessions.values():
+                j = getattr(s.system_state, "trade_journal", None)
+                if j:
+                    return j.get_last_trades(200)
+        except Exception:
+            pass
+        if self.trade_journal:
+            return self.trade_journal.get_last_trades(200)
+        return []
+
+    # -------------------------
     # Refresh
     # -------------------------
 
@@ -201,10 +225,7 @@ class DashboardCache:
 
         metrics = self.metrics_engine.summary()
 
-        if self.trade_journal:
-            trades = self.trade_journal.get_last_trades(200)
-        else:
-            trades = []
+        trades = self._get_recent_trades_for_dashboard()
 
         # ------------------------------
         # Market Bias

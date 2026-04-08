@@ -25,7 +25,8 @@ class ExecutionFactory:
             live_system = build_live_execution_system(
                 config=session.config,
                 event_bus=session.state_bus,
-                logger=None
+                logger=None,
+                persistence_key=session.id,
             )
 
             # 🔥 QUAN TRỌNG NHẤT
@@ -45,7 +46,8 @@ class ExecutionFactory:
             live_system = build_live_execution_system(
                 config=session.config,
                 event_bus=session.state_bus,
-                logger=None
+                logger=None,
+                persistence_key=session.id,
             )
 
             # 🔥 QUAN TRỌNG NHẤT

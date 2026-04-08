@@ -40,7 +40,7 @@ async def lifespan(app: FastAPI):
     # 1️⃣ INIT CORE OBJECTS
     app.state.state_hub = StateHub()
 
-    manager = RunManager()
+    manager = RunManager(app.state.state_hub)
     app.state.manager = manager
     app.state.lifecycle_hooks = LifecycleHooks(manager)
 
@@ -54,34 +54,9 @@ async def lifespan(app: FastAPI):
     # ✅ Health Check Engine (Check system button)
     app.state.health_engine = HealthCheckEngine(app)
 
-    # =============================
-    # AUTO CREATE LIVE SHADOW SESSION
-    # =============================
-    print("[APP] creating live_shadow session")
-    
-    manager.create_session(
-        mode="live-shadow",
-        config={"id": "live_shadow"},
-        app=app              # 👈 CỰC KỲ QUAN TRỌNG
-    )
+    # Sessions are created explicitly via POST /api/system/session/create (or /api/session/create).
+    # No implicit bootstrap here — avoids duplicate INIT and mode clashes with runtime_config.
 
-    manager.start_session("live_shadow")
-    print("[APP] live_shadow session started")
-
-    # =============================
-    # AUTO CREATE PAPER SESSION
-    # =============================
-    print("[APP] creating paper session")
-
-    manager.create_session(
-        mode="paper",
-        config={"id": "paper"},
-        app=app
-    )
-
-    manager.start_session("paper")
-    print("[APP] paper session started")
-    
     # ===== APP CHẠY TỪ ĐÂY =====
     
     yield
