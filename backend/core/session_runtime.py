@@ -92,6 +92,11 @@ class SessionRuntime:
             health=health,
             intent=intent,
         )
+        print(
+            "[DECISION BEFORE EXEC]",
+            type(decision),
+            getattr(decision.plan, "metadata", None),
+        )
 
         last_decision = LastDecision(
             plan=decision.plan,

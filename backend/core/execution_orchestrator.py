@@ -7,7 +7,7 @@ from backend.core.execution_models import (
 )
 from enum import Enum
 from dataclasses import dataclass
-from typing import Optional
+from typing import Optional, Dict, Any
 import time
 from backend.observability.execution_monitor_instance import execution_monitor
 
@@ -61,6 +61,7 @@ class ExecutionIntent:
     size: Optional[float] = None
     price: Optional[float] = None
     source: str = "strategy"
+    metadata: Optional[Dict[str, Any]] = None
 
 @dataclass
 class ExecutionDecision:
@@ -88,6 +89,13 @@ class ExecutionOrchestrator:
         health: SystemHealth,
         intent: ExecutionIntent,
     ) -> ExecutionDecision:
+        def _debug_return(result):
+            print(
+                "[ORCHESTRATOR RETURN]",
+                type(result),
+                getattr(result.plan, "metadata", None),
+            )
+            return result
 
         now = int(time.time() * 1000)
         # ===== Execution Monitoring: signal trace =====
@@ -124,57 +132,57 @@ class ExecutionOrchestrator:
 
         # ---- A. Authority gate (Section 9.2.A) ----
         if authority == Authority.LIVE_READONLY:
-            return self._build_plan(
+            return _debug_return(self._build_plan(
                 PlanAction.BLOCK,
                 position,
                 intent,
                 now,
                 reason="authority=live-readonly",
-            )
+            ))
 
         # ---- B. Kill switch (Section 9.2.B) ----
         if risk.kill_switch:
-            return self._build_plan(
+            return _debug_return(self._build_plan(
                 PlanAction.BLOCK,
                 position,
                 intent,
                 now,
                 reason="kill-switch=ON"
-            )
+            ))
 
         # ---- C. Risk breach (Section 9.2.C) ----
         if risk.breach:
-            return self._build_plan(
+            return _debug_return(self._build_plan(
                 PlanAction.BLOCK,
                 position,
                 intent,
                 now,
                 reason="risk-breach"
-            )
+            ))
 
         # ---- D. System health override (Section 9.2.E) ----
         if health == SystemHealth.CRITICAL:
-            return self._build_plan(
+            return _debug_return(self._build_plan(
                 PlanAction.BLOCK,
                 position,
                 intent,
                 now,
                 reason="system-health=critical"
-            )
+            ))
 
         action = getattr(intent, "action", "")
 
         if health == SystemHealth.DEGRADED and action.startswith("open"):
-            return self._build_plan(
+            return _debug_return(self._build_plan(
                 PlanAction.BLOCK,
                 position,
                 intent,
                 now,
                 reason="system-health=degraded"
-            )
+            ))
 
         # ---- E. Position vs Intent (Section 9.2.D) ----
-        return self._decide_by_position(position, intent, now)
+        return _debug_return(self._decide_by_position(position, intent, now))
 
     # ===== INTERNAL =====
 
@@ -368,6 +376,11 @@ class ExecutionOrchestrator:
             plan,
             "metadata",
             getattr(intent, "metadata", {}),
+        )
+        print(
+            "[BUILD PLAN]",
+            type(plan),
+            getattr(plan, "metadata", None),
         )
         return NewExecutionDecision(plan=plan)
 
