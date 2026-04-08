@@ -39,6 +39,8 @@ class SyncEngine:
         self._post_stream_reduce_guard_ttl = 3.0
         # Binance order id -> latest cumulative z on PARTIALLY_FILLED; cleared on FILLED
         self._order_fill_accumulator = {}
+        # Symbol-level hint: next flat->open position update is expected from bot order.
+        self._bot_open_expected = {}
 
     def _position_side_size(self, symbol: str):
         for p in self.position.get_all():
@@ -319,6 +321,11 @@ class SyncEngine:
                         del self._expected_reverse[symbol]
                         manual_open = False
 
+                if self._bot_open_expected.get(symbol):
+                    print("🛡 BOT OPEN — skip manual guard:", symbol)
+                    self._bot_open_expected[symbol] = False
+                    return
+
                 # flat → manual open
                 min_size = self._get_symbol_min_size(symbol)
 
@@ -482,6 +489,10 @@ class SyncEngine:
                     latency["exchange_ack_time"] = now
 
                     print("🔥 ACK RECEIVED:", key)
+
+                    # Bot-origin order hint: use clientOrderId already tracked by execution latency buffer.
+                    if execution_id and symbol and key in self._latency_buffer:
+                        self._bot_open_expected[symbol] = True
 
                 if o.get("i") is not None and o.get("X") == "PARTIALLY_FILLED":
                     self._order_fill_accumulator[str(o["i"])] = float(o.get("z", 0))
