@@ -101,6 +101,7 @@ async def ws_intent(websocket: WebSocket, session_id: str):
                 source=raw_msg.get("source", "manual"),
                 metadata=metadata
             )
+            print("[INTENT METADATA]", exec_intent.metadata)
 
             exec_intent.validate_schema()
             
