@@ -349,17 +349,21 @@ class ExecutionOrchestrator:
         # close / reduce sẽ không cần side
         # vì execution layer sẽ dùng position hiện tại
 
-        return NewExecutionDecision(
-            plan=NewExecutionPlan(
-                action=action,
-                symbol=intent.symbol,
-                side=side,
-                quantity=size,
-                reduce_only=reduce_only,
-                reason=reason,
-                source=intent.source,
-                timestamp=ts,
-            )
+        plan = NewExecutionPlan(
+            action=action,
+            symbol=intent.symbol,
+            side=side,
+            quantity=size,
+            reduce_only=reduce_only,
+            reason=reason,
+            source=intent.source,
+            timestamp=ts,
         )
+        object.__setattr__(
+            plan,
+            "metadata",
+            getattr(intent, "metadata", {}),
+        )
+        return NewExecutionDecision(plan=plan)
 
     
