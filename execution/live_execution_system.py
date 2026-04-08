@@ -128,6 +128,7 @@ class LiveExecutionSystem:
         self,
         *,
         execution_id: str,
+        client_order_id: str | None = None,
         symbol: str,
         side: str,
         quantity: float,
@@ -139,7 +140,8 @@ class LiveExecutionSystem:
         tp = metadata.get("tp")
         if not sl and not tp:
             return
-        self._pending_brackets[execution_id] = {
+        bracket_key = f"{symbol}-{client_order_id or execution_id}"
+        self._pending_brackets[bracket_key] = {
             "symbol": symbol,
             "side": side,
             "quantity": float(quantity),
@@ -240,8 +242,11 @@ class LiveExecutionSystem:
                 )
             # Store bracket intent and place after websocket FILLED confirms open.
             try:
+                raw = getattr(fill, "raw", None) or {}
+                client_order_id = raw.get("clientOrderId") if isinstance(raw, dict) else None
                 self.register_pending_brackets(
                     execution_id=execution_id,
+                    client_order_id=client_order_id,
                     symbol=symbol,
                     side=plan.side.value.upper(),
                     quantity=quantity,

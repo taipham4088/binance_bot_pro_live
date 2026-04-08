@@ -673,8 +673,7 @@ class SyncEngine:
                     try:
                         execution = getattr(self, "live_execution_system", None)
                         client_order_id = o.get("c") or execution_id
-                        mapped_execution_id = self.reverse_lookup_execution_id(client_order_id)
-                        key = client_order_id or mapped_execution_id
+                        key = f"{symbol}-{client_order_id}"
                         pending = (
                             execution.pop_pending_brackets(key)
                             if execution and hasattr(execution, "pop_pending_brackets")
