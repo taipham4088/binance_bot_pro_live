@@ -41,6 +41,7 @@ class SyncEngine:
         self._order_fill_accumulator = {}
         # Symbol-level hint: next flat->open position update is expected from bot order.
         self._bot_open_expected = {}
+        self._execution_to_client = {}
 
     def _position_side_size(self, symbol: str):
         for p in self.position.get_all():
@@ -142,6 +143,22 @@ class SyncEngine:
             self._latency_buffer[new_key] = self._latency_buffer.pop(old_key)
 
         print("🔥 LATENCY ID MIGRATED:", old_key, "→", new_key)
+
+    def lookup_execution_id(self, symbol, client_id):
+        if not symbol or not client_id:
+            return None
+        key = f"{symbol}-{client_id}"
+        if key in self._latency_buffer:
+            return client_id
+        return None
+
+    def reverse_lookup_execution_id(self, client_order_id):
+        if not client_order_id:
+            return None
+        for execution_id, cid in self._execution_to_client.items():
+            if cid == client_order_id:
+                return execution_id
+        return None
 
     # ======================
     # ALERT HOOK
@@ -468,6 +485,7 @@ class SyncEngine:
 
                     execution_id = o.get("c")
                     symbol = o.get("s")
+                    client_id = o.get("c")
 
                     key = f"{symbol}-{execution_id}"
 
@@ -493,6 +511,9 @@ class SyncEngine:
                     # Bot-origin order hint: use clientOrderId already tracked by execution latency buffer.
                     if execution_id and symbol and key in self._latency_buffer:
                         self._bot_open_expected[symbol] = True
+                    execution_id = self.lookup_execution_id(symbol, client_id)
+                    if execution_id:
+                        self._execution_to_client[execution_id] = client_id
 
                 if o.get("i") is not None and o.get("X") == "PARTIALLY_FILLED":
                     self._order_fill_accumulator[str(o["i"])] = float(o.get("z", 0))
@@ -651,8 +672,11 @@ class SyncEngine:
                     # =========================
                     try:
                         execution = getattr(self, "live_execution_system", None)
+                        client_order_id = o.get("c") or execution_id
+                        mapped_execution_id = self.reverse_lookup_execution_id(client_order_id)
+                        key = client_order_id or mapped_execution_id
                         pending = (
-                            execution.pop_pending_brackets(execution_id)
+                            execution.pop_pending_brackets(key)
                             if execution and hasattr(execution, "pop_pending_brackets")
                             else None
                         )
