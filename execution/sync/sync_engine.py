@@ -646,6 +646,53 @@ class SyncEngine:
                     })
 
                     print("[SYNC] EXECUTION EVENT:", symbol, side, qty, price)
+                    # =========================
+                    # PLACE SL / TP AFTER FILL
+                    # =========================
+                    try:
+                        execution = getattr(self, "live_execution_system", None)
+                        pending = (
+                            execution.pop_pending_brackets(execution_id)
+                            if execution and hasattr(execution, "pop_pending_brackets")
+                            else None
+                        )
+                        if pending:
+                            sl = pending.get("sl")
+                            tp = pending.get("tp")
+                            if sl or tp:
+                                print("[BRACKET] placing SL/TP", symbol, sl, tp)
+
+                                async def _place():
+                                    if hasattr(execution.exchange, "place_bracket_orders"):
+                                        await execution.exchange.place_bracket_orders(
+                                            symbol=symbol,
+                                            side="LONG" if side == "BUY" else "SHORT",
+                                            quantity=qty,
+                                            stop_loss=sl,
+                                            take_profit=tp,
+                                            execution_id=execution_id,
+                                        )
+                                    else:
+                                        if sl and hasattr(execution.exchange, "place_stop_loss"):
+                                            await execution.exchange.place_stop_loss(
+                                                symbol=symbol,
+                                                side="LONG" if side == "BUY" else "SHORT",
+                                                quantity=qty,
+                                                stop_price=sl,
+                                                execution_id=execution_id,
+                                            )
+                                        if tp and hasattr(execution.exchange, "place_take_profit"):
+                                            await execution.exchange.place_take_profit(
+                                                symbol=symbol,
+                                                side="LONG" if side == "BUY" else "SHORT",
+                                                quantity=qty,
+                                                tp_price=tp,
+                                                execution_id=execution_id,
+                                            )
+
+                                asyncio.create_task(_place())
+                    except Exception as e:
+                        print("[BRACKET ERROR AFTER FILL]", e)
                     from execution.sync.models import PositionState
 
                     # Opposite-side fill: sync full/partial close or single-fill reverse (not only reduce_only)

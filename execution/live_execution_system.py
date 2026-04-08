@@ -71,6 +71,8 @@ class LiveExecutionSystem:
         self.running = False
         self._reconcile_interval = 3
         self._reconcile_task = None
+        # execution_id -> bracket payload (symbol, side, qty, sl/tp)
+        self._pending_brackets = {}
 
     # =========================
     # LIFECYCLE
@@ -121,6 +123,34 @@ class LiveExecutionSystem:
     # =========================
     # CORE EXECUTION
     # =========================
+
+    def register_pending_brackets(
+        self,
+        *,
+        execution_id: str,
+        symbol: str,
+        side: str,
+        quantity: float,
+        metadata: dict,
+    ):
+        if not execution_id or not isinstance(metadata, dict):
+            return
+        sl = metadata.get("sl")
+        tp = metadata.get("tp")
+        if not sl and not tp:
+            return
+        self._pending_brackets[execution_id] = {
+            "symbol": symbol,
+            "side": side,
+            "quantity": float(quantity),
+            "sl": sl,
+            "tp": tp,
+        }
+
+    def pop_pending_brackets(self, execution_id: str):
+        if not execution_id:
+            return None
+        return self._pending_brackets.pop(execution_id, None)
 
     async def execute_plan(self, plan: ExecutionPlan):
 
@@ -208,44 +238,17 @@ class LiveExecutionSystem:
                     side=plan.side.value.lower(),
                     filled_qty=actual_qty,
                 )
-                # =========================
-                # PLACE SL / TP (Execution-level)
-                # =========================
-                try:
-                    metadata = getattr(plan, "metadata", {}) or {}
-                    sl = metadata.get("sl")
-                    tp = metadata.get("tp")
-
-                    if sl or tp:
-                        print("[BRACKET] placing SL/TP", symbol, sl, tp)
-                        if hasattr(self.exchange, "place_bracket_orders"):
-                            await self.exchange.place_bracket_orders(
-                                symbol=symbol,
-                                side=plan.side.value.upper(),
-                                quantity=quantity,
-                                stop_loss=sl,
-                                take_profit=tp,
-                                execution_id=execution_id,
-                            )
-                        else:
-                            if sl and hasattr(self.exchange, "place_stop_loss"):
-                                await self.exchange.place_stop_loss(
-                                    symbol=symbol,
-                                    side=plan.side.value.upper(),
-                                    quantity=quantity,
-                                    stop_price=sl,
-                                    execution_id=execution_id,
-                                )
-                            if tp and hasattr(self.exchange, "place_take_profit"):
-                                await self.exchange.place_take_profit(
-                                    symbol=symbol,
-                                    side=plan.side.value.upper(),
-                                    quantity=quantity,
-                                    tp_price=tp,
-                                    execution_id=execution_id,
-                                )
-                except Exception as e:
-                    print("[BRACKET ERROR]", e)
+            # Store bracket intent and place after websocket FILLED confirms open.
+            try:
+                self.register_pending_brackets(
+                    execution_id=execution_id,
+                    symbol=symbol,
+                    side=plan.side.value.upper(),
+                    quantity=quantity,
+                    metadata=getattr(plan, "metadata", {}) or {},
+                )
+            except Exception as e:
+                print("[BRACKET STORE ERROR]", e)
 
         # =========================
         # CLOSE / REDUCE
