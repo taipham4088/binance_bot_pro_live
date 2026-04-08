@@ -7,7 +7,7 @@ def dual_engine_factory(config, context, market, execution, account, **kwargs):
         config=config,
         context=context,
         market=market,
-        execution=execution,
+        execution_adapter=execution,
         account=account
     )
 

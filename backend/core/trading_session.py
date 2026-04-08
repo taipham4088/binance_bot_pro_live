@@ -167,6 +167,8 @@ class TradingSession:
         if self._execution_attached:
             return
         from backend.execution.execution_factory import ExecutionFactory
+        from backend.execution.strategy_execution_adapter import StrategyExecutionAdapter
+        from backend.adapters.execution.paper_execution_adapter import PaperExecutionAdapter
         from execution.system.execution_window import ExecutionWindow
         from backend.core.persistence.execution_journal import ExecutionJournal
         from trading_core.engines.dual_engine import DualEngine
@@ -183,6 +185,11 @@ class TradingSession:
             execution_window=self.execution_window,
             journal=self.execution_journal,
         )
+
+        try:
+            _strategy_loop = asyncio.get_event_loop()
+        except RuntimeError:
+            _strategy_loop = None
 
         context = RuntimeContext(self.config)
 
@@ -219,11 +226,19 @@ class TradingSession:
 
         self.strategy_account = StrategyAccount()
 
+        if self.mode == "paper":
+            _strategy_exec_adapter = PaperExecutionAdapter()
+        else:
+            _strategy_exec_adapter = StrategyExecutionAdapter(
+                session=self,
+                loop=_strategy_loop,
+            )
+
         self.strategy_engine = DualEngine(
             config=self.config,
             context=context,
             market=None,
-            execution=self.executor,
+            execution_adapter=_strategy_exec_adapter,
             account=self.strategy_account,
         )
         self.engine = self.executor

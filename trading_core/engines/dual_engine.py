@@ -5,15 +5,67 @@ from trading_core.engines.long_engine import LongEngine
 from trading_core.engines.short_engine import ShortEngine
 
 
+class _DefaultBacktestExecutionAdapter:
+    """In-process sink when no execution_adapter is supplied (e.g. CSV backtest)."""
+
+    def send_order(self, order_intent: dict):
+        return None
+
+
+class _DefaultBacktestAccount:
+    """Minimal account when none is supplied (keeps trading_core runners self-contained)."""
+
+    def __init__(self, balance: float = 10000.0):
+        self.balance = balance
+        self._blocked_until = None
+        self._current_day = None
+        self.daily_loss_count = 0
+
+    def get_balance(self):
+        return self.balance
+
+    def get_equity(self):
+        return self.balance
+
+    def get_state(self):
+        class State:
+            pass
+
+        s = State()
+        s.current_day = self._current_day
+        s.blocked_until = self._blocked_until
+        s.daily_loss_count = self.daily_loss_count
+        return s
+
+    def register_loss(self, v):
+        self.balance -= v
+
+    def register_win(self, v):
+        self.balance += v
+
+    def reset_day(self, day):
+        self._current_day = day
+
+    def daily_dd(self):
+        return 0
+
+    def block_until(self, until):
+        self._blocked_until = until
+
+
 class DualEngine:
 
-    def __init__(self, config, context, market, execution, account):
+    def __init__(self, config, context, market=None, execution_adapter=None, account=None):
         self.config = config
         self.context = context
 
         # 🔌 ports
         self.market = market
-        self.execution = execution
+        if execution_adapter is None:
+            execution_adapter = _DefaultBacktestExecutionAdapter()
+        self.execution_adapter = execution_adapter
+        if account is None:
+            account = _DefaultBacktestAccount()
         self.account = account
 
         # analytics only
@@ -108,8 +160,8 @@ class DualEngine:
             "meta": signal
         }
 
-        # 🚀 gửi lệnh qua execution port
-        self.execution.send_order(order_intent)
+        # 🚀 execution pipeline (live: StrategyExecutionAdapter → inject_intent)
+        self.execution_adapter.send_order(order_intent)
 
     # =========================
     # MANAGE POSITION
