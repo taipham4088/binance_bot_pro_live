@@ -517,13 +517,21 @@ class SyncEngine:
 
                     execution = getattr(self, "live_execution_system", None)
                     if execution and hasattr(execution, "register_pending_brackets"):
+                        intent_id = None
+                        if hasattr(execution, "_execution_to_intent"):
+                            intent_id = execution._execution_to_intent.get(execution_id)
+                        if intent_id and hasattr(execution, "_execution_to_intent"):
+                            execution._execution_to_intent[client_id] = intent_id
+                        metadata = {}
+                        if intent_id:
+                            metadata = execution._last_intent_metadata.get(intent_id, {})
                         execution.register_pending_brackets(
                             execution_id=execution_id,
                             client_order_id=o.get("c"),
                             symbol=symbol,
                             side=o.get("S"),
                             quantity=float(o.get("q")),
-                            metadata=execution._last_intent_metadata.get(execution_id, {}),
+                            metadata=metadata,
                         )
 
                 if o.get("i") is not None and o.get("X") == "PARTIALLY_FILLED":

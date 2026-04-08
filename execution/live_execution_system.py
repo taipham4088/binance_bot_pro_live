@@ -1,6 +1,7 @@
 # execution/live_execution_system.py
 import time
 import asyncio
+import uuid
 from types import SimpleNamespace
 
 from backend.core.execution_models import ExecutionPlan, PlanAction, PositionSide
@@ -74,6 +75,7 @@ class LiveExecutionSystem:
         # execution_id -> bracket payload (symbol, side, qty, sl/tp)
         self._pending_brackets = {}
         self._last_intent_metadata = {}
+        self._execution_to_intent = {}
 
     # =========================
     # LIFECYCLE
@@ -188,23 +190,29 @@ class LiveExecutionSystem:
         if plan.action in (PlanAction.NOOP, PlanAction.BLOCK):
             return
 
-        symbol = plan.symbol
-        quantity = float(plan.quantity)
-        self._last_intent_metadata[execution_id] = getattr(plan, "metadata", {}) or {}
-
-        # =========================
-        # EXECUTION
-        # =========================
-        # 🔥 SIGNAL TIME
-        signal_time = time.time()
-        import uuid
-
         execution_id = getattr(plan, "execution_id", None)
 
         # 🔥 IMPORTANT — keep same execution id if already exists
         if execution_id is None:
             execution_id = f"manual_{uuid.uuid4().hex[:8]}"
             object.__setattr__(plan, "execution_id", execution_id)
+
+        symbol = plan.symbol
+        quantity = float(plan.quantity)
+        metadata = getattr(plan, "metadata", {}) or {}
+        intent_id = (
+            getattr(plan, "intent_id", None)
+            or metadata.get("intent_id")
+            or execution_id
+        )
+        self._last_intent_metadata[intent_id] = metadata
+        self._execution_to_intent[execution_id] = intent_id
+
+        # =========================
+        # EXECUTION
+        # =========================
+        # 🔥 SIGNAL TIME
+        signal_time = time.time()
 
         print("EXECUTION_ID (LIVE):", execution_id)
 
