@@ -361,6 +361,11 @@ class ExecutionOrchestrator:
         )
         object.__setattr__(
             plan,
+            "intent_id",
+            getattr(intent, "intent_id", None),
+        )
+        object.__setattr__(
+            plan,
             "metadata",
             getattr(intent, "metadata", {}),
         )
