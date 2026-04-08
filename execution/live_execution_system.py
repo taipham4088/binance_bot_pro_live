@@ -73,6 +73,7 @@ class LiveExecutionSystem:
         self._reconcile_task = None
         # execution_id -> bracket payload (symbol, side, qty, sl/tp)
         self._pending_brackets = {}
+        self._last_intent_metadata = {}
 
     # =========================
     # LIFECYCLE
@@ -189,6 +190,7 @@ class LiveExecutionSystem:
 
         symbol = plan.symbol
         quantity = float(plan.quantity)
+        self._last_intent_metadata[symbol] = getattr(plan, "metadata", {}) or {}
 
         # =========================
         # EXECUTION

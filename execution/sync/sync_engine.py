@@ -515,6 +515,17 @@ class SyncEngine:
                     if execution_id:
                         self._execution_to_client[execution_id] = client_id
 
+                    execution = getattr(self, "live_execution_system", None)
+                    if execution and hasattr(execution, "register_pending_brackets"):
+                        execution.register_pending_brackets(
+                            execution_id=execution_id,
+                            client_order_id=o.get("c"),
+                            symbol=symbol,
+                            side=o.get("S"),
+                            quantity=float(o.get("q")),
+                            metadata=execution._last_intent_metadata.get(symbol, {}),
+                        )
+
                 if o.get("i") is not None and o.get("X") == "PARTIALLY_FILLED":
                     self._order_fill_accumulator[str(o["i"])] = float(o.get("z", 0))
 
