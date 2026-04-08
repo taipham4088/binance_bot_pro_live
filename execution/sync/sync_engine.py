@@ -124,6 +124,7 @@ class SyncEngine:
         }
 
         print("🔥 SIGNAL REGISTERED:", key)
+        print("[SIGNAL REGISTER METADATA]", key, self._latency_buffer[key])
 
     def update_order_sent(self, symbol, execution_id, order_sent_time):
 
@@ -491,7 +492,10 @@ class SyncEngine:
 
                     now = time.time()
 
-                    latency = self._latency_buffer.setdefault(key, {})
+                    latency = self._latency_buffer.get(key)
+                    if latency is None:
+                        latency = {}
+                        self._latency_buffer[key] = latency
 
                     # fallback signal (sớm hơn)
                     if "signal_time" not in latency:
@@ -511,7 +515,7 @@ class SyncEngine:
                     # Bot-origin order hint: use clientOrderId already tracked by execution latency buffer.
                     if execution_id and symbol and key in self._latency_buffer:
                         self._bot_open_expected[symbol] = True
-                    execution_id = self.lookup_execution_id(symbol, client_id)
+                    execution_id = client_id
                     if execution_id:
                         self._execution_to_client[execution_id] = client_id
 
@@ -689,8 +693,7 @@ class SyncEngine:
                     # =========================
                     try:
                         execution = getattr(self, "live_execution_system", None)
-                        client_order_id = o.get("c") or execution_id
-                        key = f"{symbol}-{client_order_id}"
+                        key = f"{symbol}-{execution_id}"
                         print("[BRACKET LOOKUP]", key)
                         pending = (
                             execution.pop_pending_brackets(key)

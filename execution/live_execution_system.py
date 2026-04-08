@@ -200,6 +200,7 @@ class LiveExecutionSystem:
         symbol = plan.symbol
         quantity = float(plan.quantity)
         metadata = getattr(plan, "metadata", {}) or {}
+        print("[PLAN METADATA]", metadata)
         intent_id = (
             getattr(plan, "intent_id", None)
             or metadata.get("intent_id")
@@ -217,22 +218,19 @@ class LiveExecutionSystem:
         print("EXECUTION_ID (LIVE):", execution_id)
 
         try:
+            # register signal first
             self.sync_engine.register_signal(
                 symbol,
                 execution_id,
                 signal_time,
                 None
             )
-            key = f"{symbol}-{execution_id}"
-            latency = self.sync_engine._latency_buffer.setdefault(key, {})
-            latency["metadata"] = getattr(plan, "metadata", {})
-            print("LIVE SYNC ENGINE ID:", id(self.sync_engine))
-            print("LIVE LATENCY BUFFER ID:", id(self.sync_engine._latency_buffer))
-            print("[ATTACH METADATA]", key, latency["metadata"])
+
         except Exception as e:
             print("[LATENCY REGISTER ERROR]", e)
 
-        # ðŸ”¥ ORDER SENT TIME
+
+        # 🔥 ORDER SENT TIME
         order_sent_time = time.time()
 
         try:
@@ -241,37 +239,57 @@ class LiveExecutionSystem:
                 execution_id,
                 order_sent_time
             )
+
         except Exception as e:
             print("[ORDER SENT UPDATE ERROR]", e)
+
+
+        # 🔥 ATTACH METADATA AFTER update_order_sent (FIX BUG)
+        try:
+            key = f"{symbol}-{execution_id}"
+            latency = self.sync_engine._latency_buffer.setdefault(key, {})
+            latency["metadata"] = metadata
+
+            print("LIVE SYNC ENGINE ID:", id(self.sync_engine))
+            print("LIVE LATENCY BUFFER ID:", id(self.sync_engine._latency_buffer))
+            print("[ATTACH METADATA]", key, latency["metadata"])
+
+        except Exception as e:
+            print("[METADATA ATTACH ERROR]", e)
 
         # =========================
         # OPEN
         # =========================
         if plan.action == PlanAction.OPEN:
 
-            fill = await self.exchange.open_position(
-                symbol=symbol,
-                side=plan.side.value.upper(),
-                quantity=quantity,
-                execution_id=execution_id
-            )
-
-            # register immediately after open_position
+            # 🔥 REGISTER BEFORE OPEN (FIX RACE CONDITION)
             try:
-                raw = getattr(fill, "raw", None) or {}
-                client_order_id = raw.get("clientOrderId") if isinstance(raw, dict) else None
-
                 self.register_pending_brackets(
                     execution_id=execution_id,
-                    client_order_id=client_order_id,
+                    client_order_id=execution_id,
                     symbol=symbol,
                     side=plan.side.value.upper(),
                     quantity=quantity,
                     metadata=getattr(plan, "metadata", {}) or {},
                 )
 
+                print(
+                    "[BRACKET PRE-REGISTER]",
+                    symbol,
+                    execution_id,
+                    getattr(plan, "metadata", {})
+                )
+
             except Exception as e:
                 print("[BRACKET REGISTER ERROR]", e)
+
+            # Send order AFTER register
+            fill = await self.exchange.open_position(
+                symbol=symbol,
+                side=plan.side.value.upper(),
+                quantity=quantity,
+                execution_id=execution_id
+            )
 
             actual_qty = float(getattr(fill, "filled_quantity", 0))
 

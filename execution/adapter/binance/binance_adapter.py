@@ -307,6 +307,7 @@ class BinanceExecutionAdapter(BaseExchangeAdapter):
         try:
             response = self.trade.place_order(
                 execution_id=local_id,
+                newClientOrderId=local_id,
                 symbol=symbol,
                 side=binance_side,
                 type="MARKET",
@@ -394,6 +395,7 @@ class BinanceExecutionAdapter(BaseExchangeAdapter):
  
                 response = self.trade.place_order(
                     execution_id=local_id,
+                    newClientOrderId=local_id,
                     symbol=symbol,
                     side=side,
                     type="MARKET",
