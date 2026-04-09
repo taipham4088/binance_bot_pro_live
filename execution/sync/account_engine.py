@@ -1,5 +1,7 @@
-from .models import AccountState
+import math
 import time
+
+from .models import AccountState
 
 
 class AccountEngine:
@@ -26,3 +28,38 @@ class AccountEngine:
         if v is None:
             return 0.0
         return float(v)
+
+    def total_account_equity_usdt(
+        self,
+        *,
+        btc_usdt: float | None = None,
+        eth_usdt: float | None = None,
+    ) -> float:
+        """
+        Dashboard-only: approximate account value in USDT terms from wallet balances.
+        USDT/USDC treated 1:1 USD; BTC/ETH scaled by provided mark/last prices.
+        Does not affect risk sizing (get_equity remains USDT-only).
+        """
+        total = 0.0
+
+        def _w(asset: str) -> float:
+            v = self.state.balances.get(asset)
+            if v is None:
+                return 0.0
+            try:
+                x = float(v)
+            except (TypeError, ValueError):
+                return 0.0
+            return x if math.isfinite(x) else 0.0
+
+        total += _w("USDT") + _w("USDC")
+
+        bpx = btc_usdt
+        if bpx is not None and math.isfinite(bpx) and bpx > 0:
+            total += _w("BTC") * bpx
+
+        epx = eth_usdt
+        if epx is not None and math.isfinite(epx) and epx > 0:
+            total += _w("ETH") * epx
+
+        return float(total)

@@ -1,6 +1,7 @@
 import time
 import requests
 from backend.runtime.exchange_config import exchange_config
+from backend.utils.symbol_utils import extract_quote_asset
 from backend.analytics.market_bias_engine import market_bias_engine
 from backend.runtime.runtime_config import runtime_config
 
@@ -217,6 +218,32 @@ class DashboardCache:
         self.pnl_engine.update_floating_pnl(floating)
 
         pnl = self.pnl_engine.summary()
+
+        # Live / shadow: align dashboard with risk sizing (quote wallet + floating).
+        # PnLEngine alone uses journal DB + fixed start_balance — not exchange truth.
+        try:
+            manager = self.app_state.manager
+            if manager and manager.sessions:
+                sess = list(manager.sessions.values())[0]
+                eng = getattr(sess, "engine", None)
+                if eng is not None and getattr(eng, "sync_engine", None):
+                    acct = eng.sync_engine.account
+                    sym = getattr(sess, "active_symbol", None) or sess._initial_symbol_from_config()
+                    quote = extract_quote_asset(sym)
+                    wallet = float(sess.get_dynamic_equity())
+                    pnl["trading_quote_asset"] = quote
+                    pnl["exchange_wallet_quote"] = wallet
+                    pnl["exchange_wallet_usdt"] = float(acct.get_equity("USDT"))
+                    pnl["equity"] = wallet + floating
+                    pnl["total_equity"] = wallet + floating
+                    btc_px = self._get_price("BTCUSDT")
+                    eth_px = self._get_price("ETHUSDT")
+                    pnl["account_equity"] = acct.total_account_equity_usdt(
+                        btc_usdt=btc_px,
+                        eth_usdt=eth_px,
+                    )
+        except Exception:
+            pass
 
         # DEBUG
         print("POSITION:", position)

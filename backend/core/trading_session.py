@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Dict, Optional
 
+from backend.utils.symbol_utils import extract_quote_asset
 from backend.strategy.strategy_router import StrategyRouter
 from backend.core.system_state_engine import SystemStateEngine
 from backend.risk.readonly_risk_system import ReadOnlyRiskSystem
@@ -835,7 +836,9 @@ class TradingSession:
             sync_engine = getattr(self.engine, "sync_engine", None)
 
             if sync_engine:
-                return sync_engine.account.get_equity()
+                sym = getattr(self, "active_symbol", None) or self._initial_symbol_from_config()
+                quote = extract_quote_asset(sym)
+                return sync_engine.account.get_equity(quote)
 
         except Exception:
             pass
