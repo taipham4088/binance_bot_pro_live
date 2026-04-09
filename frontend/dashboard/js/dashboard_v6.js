@@ -604,42 +604,98 @@ function updatePosition(data){
 
 }
 
+function pnlFmtNum(v){
+if(v === null || v === undefined || Number.isNaN(Number(v))) return "—"
+return Number(v).toFixed(2)
+}
+
+function pnlFmtStr(v, fallback){
+if(v === null || v === undefined || v === "") return fallback ?? "—"
+return String(v)
+}
+
+function pnlFloatingStyle(raw){
+const n = Number(raw)
+if(Number.isNaN(n) || raw === null || raw === undefined) return "#9e9e9e"
+if(n > 0) return "#00c853"
+if(n < 0) return "#ff3d00"
+return "#9e9e9e"
+}
+
+function pnlFloatingPrefix(raw){
+const n = Number(raw)
+if(Number.isNaN(n) || raw === null || raw === undefined) return ""
+return n > 0 ? "+" : ""
+}
+
+function pnlModeLine(panel, root){
+if(root?.session_status === "no_session" || panel?.mode === "NONE"){
+return "No Active Session"
+}
+return pnlFmtStr(panel?.mode, "—")
+}
+
+function pnlRenderOnePanel(panel, root){
+const modeLine = pnlModeLine(panel, root)
+const sym = pnlFmtStr(panel?.symbol, "—")
+const quote = pnlFmtStr(panel?.quote_asset, "—")
+const equity = pnlFmtNum(panel?.equity)
+const floatingRaw = panel?.floating
+const floating = pnlFmtNum(floatingRaw)
+const total = pnlFmtNum(panel?.total_equity)
+const fc = pnlFloatingStyle(floatingRaw)
+const fp = pnlFloatingPrefix(floatingRaw)
+return `
+Mode: ${modeLine}<br>
+Symbol: ${sym}<br>
+Quote Asset: ${quote}<br>
+Equity: ${equity}<br>
+Floating: <span style="color:${fc}">${fp}${floating}</span><br>
+Total Equity: ${total}<br>
+`
+}
+
 function updatePnL(data){
 
 const pnl = data?.pnl
 if(!pnl) return
 
-const equity = Number(pnl.equity ?? 0).toFixed(2)
 const realized = Number(pnl.realized_pnl ?? 0).toFixed(2)
-const floatingRaw = Number(pnl.floating_pnl ?? 0)
-const floating = floatingRaw.toFixed(2)
-const total = Number(pnl.total_equity ?? equity).toFixed(2)
-
 const drawdown =
 (Number(pnl.max_drawdown ?? 0) * 100).toFixed(2) + "%"
 
-// 🎯 Floating color
-let floatingColor = "#9e9e9e"
+const panels = Array.isArray(pnl.panels) ? pnl.panels : []
+let body = ""
 
-if(floatingRaw > 0){
-floatingColor = "#00c853"
-}else if(floatingRaw < 0){
-floatingColor = "#ff3d00"
+if(panels.length === 0){
+const legacy = {
+mode: pnl.mode,
+symbol: pnl.symbol,
+quote_asset: pnl.quote_asset,
+equity: pnl.equity,
+floating: pnl.floating_pnl,
+total_equity: pnl.total_equity
+}
+body = pnlRenderOnePanel(legacy, pnl)
+}else if(panels.length === 1){
+body = pnlRenderOnePanel(panels[0], pnl)
+}else{
+body = panels.map((p, i) => {
+const title = pnlFmtStr(p?.mode, "—")
+const block = pnlRenderOnePanel(p, pnl)
+return `<div style="margin-bottom:6px"><b>${title}</b><br>${block}</div>`
+}).join("<hr style=\"border:none;border-top:1px solid #333;margin:8px 0\">")
 }
 
 document.getElementById("pnl").innerHTML = `
-
-Equity: ${equity}<br>
-Floating PnL: <span style="color:${floatingColor}">
-${floatingRaw > 0 ? "+" : ""}${floating}
-</span><br>
-Total Equity: ${total}<br>
+${body}
 Realized PnL: ${realized}<br>
 Drawdown: ${drawdown}
-
 `
 
-equityHistory.push(pnl.total_equity ?? pnl.equity ?? 0)
+if(pnl.session_status === "single" && pnl.total_equity != null){
+equityHistory.push(Number(pnl.total_equity))
+}
 
 if(equityHistory.length > 50){
 equityHistory.shift()
