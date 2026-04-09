@@ -559,9 +559,11 @@ if(data?.observability?.execution_monitor){
 updateExecution(data)
 }
 
-// PNL
+// PNL + risk rule status (risk_status may arrive without pnl)
 if(data.pnl){
 updatePnL(data)
+}
+if(data.pnl || data.risk_status){
 updateRisk(data)
 }
 
@@ -903,18 +905,89 @@ function updateExecutionTimeline(data){
 
 }
 
+function riskFmt(v){
+if(v === null || v === undefined) return "—"
+if(typeof v === "boolean") return v ? "yes" : "no"
+if(typeof v === "number" && Number.isFinite(v)) return String(v)
+return String(v)
+}
+
 function updateRisk(data){
 
+const rs = data?.risk_status
 const pnl = data?.pnl
-if(!pnl) return
 
+if(!rs && !pnl) return
+
+let html = ""
+
+if(rs){
+const allowed = rs.trade_allowed === true
+const blocked = Array.isArray(rs.blocked_rules) && rs.blocked_rules.length
+? rs.blocked_rules.join(", ")
+: "—"
+
+html += `<b>Trade allowed:</b> ${allowed ? "yes" : "no"}<br>`
+html += `<b>Blocked rules:</b> ${blocked}<br>`
+
+if(rs.readonly_state){
+html += `<b>Control state:</b> ${riskFmt(rs.readonly_state)}<br>`
+}
+
+const der = rs.daily_equity_risk
+if(der && typeof der === "object" && Object.keys(der).length){
+html += `<br><b>Daily start equity:</b> ${riskFmt(der.daily_start_equity)}<br>`
+html += `<b>Current equity:</b> ${riskFmt(der.current_equity)}<br>`
+html += `<b>Daily drawdown:</b> ${
+der.daily_drawdown_pct === null || der.daily_drawdown_pct === undefined
+? "—"
+: der.daily_drawdown_pct + "%"
+}<br>`
+html += `<b>Daily limit:</b> ${riskFmt(der.daily_limit_pct)}%<br><br>`
+}
+
+const ord = [
+"consecutive_loss",
+"daily_loss_limit",
+"cooldown",
+"max_drawdown"
+]
+
+const rules = rs.rules || {}
+for(const key of ord){
+const rule = rules[key]
+if(!rule) continue
+const st = riskFmt(rule.status)
+let detail = ""
+if(key === "consecutive_loss"){
+detail = `streak ${riskFmt(rule.loss_streak)} / limit ${riskFmt(rule.limit)}`
+}else if(key === "daily_loss_limit"){
+detail = `daily ${riskFmt(rule.daily_loss)} / max ${riskFmt(rule.max_daily_loss)}`
+}else if(key === "cooldown"){
+const rem = rule.remaining_time
+detail = rule.cooldown_active
+? `remaining ${riskFmt(rem)}s`
+: "—"
+}else if(key === "max_drawdown"){
+if(rule.active){
+detail = `start ${riskFmt(rule.daily_start_equity)} / curr ${riskFmt(rule.current_equity)} / dd ${riskFmt(rule.daily_drawdown_pct)}% / limit ${riskFmt(rule.max_drawdown)}%`
+}else{
+detail = "inactive until first trade (UTC day)"
+}
+}
+html += `<br><b>${key}</b> (${st})<br>${detail}<br>`
+}
+html += "<br>"
+}
+
+if(pnl){
 const drawdown = (Number(pnl.max_drawdown ?? 0) * 100).toFixed(2) + "%"
 const realized = Number(pnl.realized_pnl ?? 0).toFixed(2)
+html += `<b>Journal drawdown:</b> ${drawdown}<br>`
+html += `<b>Realized PnL:</b> ${realized}<br>`
+}
 
-document.getElementById("risk").innerHTML = `
-Drawdown: ${drawdown}<br>
-Realized PnL: ${realized}
-`
+document.getElementById("risk").innerHTML = html
 }
 
 function updateSystemMonitor(data){

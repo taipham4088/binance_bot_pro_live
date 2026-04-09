@@ -78,6 +78,14 @@ async def get_pnl(request: Request):
     return cache.get()["pnl"]
 
 
+@router.get("/api/dashboard/risk-status")
+async def get_risk_status(request: Request):
+
+    cache = request.app.state.dashboard_cache
+
+    return cache.get().get("risk_status") or {}
+
+
 @router.get("/api/dashboard/metrics")
 async def get_metrics(request: Request):
 

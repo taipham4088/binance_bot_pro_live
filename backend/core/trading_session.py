@@ -1,5 +1,6 @@
 import asyncio
 import threading
+import time
 import uuid
 from dataclasses import dataclass
 from datetime import datetime
@@ -156,7 +157,12 @@ class TradingSession:
             mode=self.mode
         )
 
-        
+        # ---- daily equity drawdown (UTC day, baseline = equity at first OPENED/CLOSED) ----
+        self._daily_equity_utc_date: str | None = None
+        self._daily_equity_started: bool = False
+        self._daily_start_equity: float | None = None
+        self._daily_equity_dd_blocked: bool = False
+
         self._restart_guard = None
         self._supervisor = None
         self._drift_detector = None
@@ -660,6 +666,13 @@ class TradingSession:
             print(f"intent_symbol={intent_sym}")
             print(f"active_symbol={active_sym}")
             return
+
+        if intent.side in ("LONG", "SHORT"):
+            self.refresh_daily_equity_risk_before_open()
+            if getattr(self, "_daily_equity_dd_blocked", False):
+                print("[DAILY_EQUITY_DD] BLOCKED open intent")
+                return
+
         await asyncio.sleep(0.3)
         pos = None
 
@@ -824,12 +837,99 @@ class TradingSession:
 
             self.risk_config[k] = v
 
+        re = getattr(self, "risk_engine", None)
+        if re is not None and hasattr(re, "set_daily_dd_limit_frac"):
+            try:
+                lim = self.risk_config.get("daily_dd_limit")
+                if lim is not None:
+                    re.set_daily_dd_limit_frac(float(lim))
+            except Exception:
+                pass
+
         print("[SESSION] risk config updated:", self.risk_config)
 
 
     def get_risk_config(self):
 
         return self.risk_config
+
+    @staticmethod
+    def _utc_calendar_date() -> str:
+        return time.strftime("%Y-%m-%d", time.gmtime())
+
+    def _roll_daily_equity_risk_utc(self) -> None:
+        today = self._utc_calendar_date()
+        if self._daily_equity_utc_date != today:
+            self._daily_equity_utc_date = today
+            self._daily_start_equity = None
+            self._daily_equity_started = False
+            self._daily_equity_dd_blocked = False
+
+    def _recompute_daily_equity_dd_block(self) -> None:
+        if not self._daily_equity_started:
+            self._daily_equity_dd_blocked = False
+            return
+        start = self._daily_start_equity
+        if start is None or start <= 0:
+            self._daily_equity_dd_blocked = False
+            return
+        try:
+            eq = float(self.get_dynamic_equity())
+        except Exception:
+            return
+        lim = float(self.risk_config.get("daily_dd_limit", 0.05))
+        dd_frac = (eq - start) / start
+        self._daily_equity_dd_blocked = dd_frac <= -lim
+
+    def refresh_daily_equity_risk_before_open(self) -> None:
+        """Call before new OPEN: roll UTC day and re-check vs live equity."""
+        self._roll_daily_equity_risk_utc()
+        self._recompute_daily_equity_dd_block()
+
+    def on_execution_decision_for_daily_risk(self, decision: str) -> None:
+        """OPENED/CLOSED from SystemStateEngine — anchor baseline on first trade of UTC day."""
+        if decision not in ("OPENED", "CLOSED"):
+            return
+        self._roll_daily_equity_risk_utc()
+        try:
+            eq = float(self.get_dynamic_equity())
+        except Exception:
+            eq = 0.0
+        if not self._daily_equity_started:
+            self._daily_start_equity = eq
+            self._daily_equity_started = True
+        self._recompute_daily_equity_dd_block()
+
+        re = getattr(self, "risk_engine", None)
+        if re is not None and hasattr(re, "tick_daily_drawdown"):
+            try:
+                lim = float(self.risk_config.get("daily_dd_limit", 0.05))
+                re.tick_daily_drawdown(eq, decision, lim)
+            except Exception:
+                pass
+
+    def get_daily_equity_risk_snapshot(self) -> dict:
+        self._roll_daily_equity_risk_utc()
+        self._recompute_daily_equity_dd_block()
+        try:
+            eq = float(self.get_dynamic_equity())
+        except Exception:
+            eq = 0.0
+        lim = float(self.risk_config.get("daily_dd_limit", 0.05))
+        start = self._daily_start_equity
+        dd_pct = None
+        if self._daily_equity_started and start is not None and start > 0:
+            dd_pct = ((eq - start) / start) * 100.0
+        return {
+            "utc_date": self._daily_equity_utc_date,
+            "daily_started": self._daily_equity_started,
+            "daily_start_equity": start,
+            "current_equity": eq,
+            "daily_drawdown_pct": dd_pct,
+            "daily_limit_frac": lim,
+            "daily_limit_pct": lim * 100.0,
+            "blocked": self._daily_equity_dd_blocked,
+        }
 
     def get_dynamic_equity(self):
         try:

@@ -608,6 +608,16 @@ class SystemStateEngine:
 
         self.emit_delta("execution", self.state["execution"])
 
+        if event.decision in ("OPENED", "CLOSED"):
+            try:
+                sess = getattr(self, "session", None)
+                if sess is not None and hasattr(
+                    sess, "on_execution_decision_for_daily_risk"
+                ):
+                    sess.on_execution_decision_for_daily_risk(event.decision)
+            except Exception:
+                pass
+
     def _reconcile_intent_state(self):
         execution = self.state.setdefault("execution", {})
         active_intent = execution.get("activeIntent")

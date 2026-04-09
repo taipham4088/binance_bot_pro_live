@@ -5,7 +5,6 @@ from backend.utils.symbol_utils import extract_quote_asset
 from backend.analytics.market_bias_engine import market_bias_engine
 from backend.runtime.runtime_config import runtime_config
 
-
 class DashboardCache:
     """
     Cache layer cho dashboard.
@@ -62,6 +61,205 @@ class DashboardCache:
         sid, _sess = item
         order = {"live": 0, "shadow": 1}
         return (order.get(sid, 50), sid)
+
+    def _merge_risk_views(self, session):
+        merged = {}
+        if session is None:
+            return merged
+        try:
+            if getattr(session, "risk_system", None):
+                merged.update(session.risk_system.snapshot() or {})
+        except Exception:
+            pass
+        try:
+            st = session.system_state.state.get("risk") or {}
+            for k, v in st.items():
+                if v is not None:
+                    merged[k] = v
+        except Exception:
+            pass
+        return merged
+
+    def _build_risk_status(self, primary, pnl_summary: dict | None) -> dict:
+        """
+        Observability-only aggregate of risk gates (session + optional risk_engine snap).
+        """
+        pnl_summary = pnl_summary or {}
+        now = int(time.time())
+
+        def _blank_rules():
+            return {
+                "consecutive_loss": {
+                    "loss_streak": None,
+                    "limit": None,
+                    "status": "OK",
+                },
+                "daily_loss_limit": {
+                    "daily_loss": None,
+                    "max_daily_loss": None,
+                    "status": "OK",
+                },
+                "cooldown": {
+                    "cooldown_active": False,
+                    "remaining_time": None,
+                    "status": "INACTIVE",
+                },
+                "max_drawdown": {
+                    "drawdown": None,
+                    "max_drawdown": None,
+                    "status": "OK",
+                    "daily_start_equity": None,
+                    "current_equity": None,
+                    "daily_drawdown_pct": None,
+                    "daily_limit_pct": None,
+                    "active": False,
+                },
+            }
+
+        if primary is None:
+            return {
+                "trade_allowed": False,
+                "blocked_rules": [],
+                "rules": _blank_rules(),
+                "session_id": None,
+                "daily_equity_risk": {},
+            }
+
+        rc = {}
+        try:
+            rc = primary.get_risk_config() or {}
+        except Exception:
+            rc = {}
+
+        max_streak_cfg = int(rc.get("daily_stop_losses", 2))
+        max_daily_frac = float(rc.get("daily_dd_limit", 0.05))
+
+        rs_view = self._merge_risk_views(primary)
+        ro_state = str(rs_view.get("state") or "").upper()
+
+        cu_raw = rs_view.get("cooldown_until")
+        cu_int = None
+        if cu_raw is not None:
+            try:
+                cu_int = int(cu_raw)
+            except (TypeError, ValueError):
+                cu_int = None
+
+        cooldown_active = bool(cu_int is not None and cu_int > now)
+        remaining = (cu_int - now) if cooldown_active else None
+
+        re_snap = None
+        re = getattr(primary, "risk_engine", None)
+        if re is not None and callable(getattr(re, "snapshot", None)):
+            try:
+                re_snap = re.snapshot()
+            except Exception:
+                re_snap = None
+
+        loss_streak = 0
+        entry_blocked = False
+
+        den: dict = {}
+        try:
+            if hasattr(primary, "get_daily_equity_risk_snapshot"):
+                den = primary.get_daily_equity_risk_snapshot() or {}
+        except Exception:
+            den = {}
+
+        daily_active = bool(den.get("daily_started"))
+        daily_dd_blocked = bool(den.get("blocked")) if daily_active else False
+        dd_pct_display = den.get("daily_drawdown_pct")
+        limit_pct_display = den.get("daily_limit_pct")
+        lim_neg_pct = (
+            -abs(float(limit_pct_display))
+            if daily_active and limit_pct_display is not None
+            else None
+        )
+
+        if re_snap and isinstance(re_snap.get("daily"), dict):
+            daily = re_snap["daily"]
+            loss_streak = int(daily.get("consecutive_losses", 0))
+            entry_blocked = bool(daily.get("entry_blocked", False))
+        else:
+            sa = getattr(primary, "strategy_account", None)
+            if sa is not None and callable(getattr(sa, "get_state", None)):
+                st = sa.get_state()
+                loss_streak = int(getattr(st, "daily_loss_count", 0) or 0)
+
+        daily_loss_frac = 0.0
+        sa = getattr(primary, "strategy_account", None)
+        if sa is not None and callable(getattr(sa, "daily_dd", None)):
+            try:
+                daily_loss_frac = float(sa.daily_dd())
+            except Exception:
+                daily_loss_frac = 0.0
+
+        backend_kill = bool(
+            re_snap and ("kill_switch" in re_snap) and re_snap.get("kill_switch")
+        )
+
+        blocked: list[str] = []
+
+        cl_blocked = entry_blocked or (
+            max_streak_cfg > 0 and loss_streak >= max_streak_cfg
+        )
+        if cl_blocked:
+            blocked.append("consecutive_loss")
+
+        dl_blocked = backend_kill or (
+            max_daily_frac > 0 and daily_loss_frac >= max_daily_frac
+        )
+        if dl_blocked:
+            blocked.append("daily_loss_limit")
+
+        if cooldown_active:
+            blocked.append("cooldown")
+
+        if daily_dd_blocked:
+            blocked.append("daily_equity_drawdown")
+
+        if ro_state == "BLOCKED":
+            blocked.append("manual_block")
+        if ro_state == "FROZEN":
+            blocked.append("manual_freeze")
+
+        rules = {
+            "consecutive_loss": {
+                "loss_streak": loss_streak,
+                "limit": max_streak_cfg,
+                "status": "BLOCKED" if cl_blocked else "OK",
+            },
+            "daily_loss_limit": {
+                "daily_loss": daily_loss_frac,
+                "max_daily_loss": max_daily_frac,
+                "status": "BLOCKED" if dl_blocked else "OK",
+            },
+            "cooldown": {
+                "cooldown_active": cooldown_active,
+                "remaining_time": remaining,
+                "status": "ACTIVE" if cooldown_active else "INACTIVE",
+            },
+            "max_drawdown": {
+                "daily_start_equity": den.get("daily_start_equity"),
+                "current_equity": den.get("current_equity"),
+                "daily_drawdown_pct": dd_pct_display,
+                "daily_limit_pct": limit_pct_display,
+                "utc_date": den.get("utc_date"),
+                "active": daily_active,
+                "drawdown": dd_pct_display,
+                "max_drawdown": lim_neg_pct,
+                "status": "BLOCKED" if daily_dd_blocked else "OK",
+            },
+        }
+
+        return {
+            "trade_allowed": len(blocked) == 0,
+            "blocked_rules": blocked,
+            "rules": rules,
+            "session_id": getattr(primary, "id", None),
+            "readonly_state": ro_state or None,
+            "daily_equity_risk": den,
+        }
 
     # -------------------------
     # Position
@@ -389,6 +587,8 @@ class DashboardCache:
             strategy_side=strategy_side
         )
 
+        risk_status = self._build_risk_status(primary, pnl)
+
         # ------------------------------
         # Dashboard Cache
         # ------------------------------
@@ -398,6 +598,7 @@ class DashboardCache:
             "position": position,
             "price": price,
             "pnl": pnl,
+            "risk_status": risk_status,
             "metrics": metrics,
             "recent_trades": trades,
             "market_bias": market_bias_engine.get(),
