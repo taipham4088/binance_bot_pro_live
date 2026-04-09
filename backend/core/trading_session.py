@@ -650,6 +650,15 @@ class TradingSession:
             raise RuntimeError(
                 "Session execution stack not started (start_session required)"
             )
+        active_sym = self._normalize_symbol(getattr(self, "active_symbol", None))
+        if not active_sym:
+            active_sym = self._initial_symbol_from_config()
+        intent_sym = self._normalize_symbol(getattr(intent, "symbol", None))
+        if intent_sym and active_sym and intent_sym != active_sym:
+            print("SYMBOL GUARD BLOCKED")
+            print(f"intent_symbol={intent_sym}")
+            print(f"active_symbol={active_sym}")
+            return
         await asyncio.sleep(0.3)
         pos = None
 
