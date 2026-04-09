@@ -1,7 +1,9 @@
-
 import asyncio
+import threading
 import uuid
+from dataclasses import dataclass
 from datetime import datetime
+from typing import Any, Dict, Optional
 
 from backend.strategy.strategy_router import StrategyRouter
 from backend.core.system_state_engine import SystemStateEngine
@@ -33,6 +35,17 @@ def mode_defers_execution_bootstrap(mode: str) -> bool:
     """Shadow / live modes: build execution stack on start(), not on create."""
     m = str(mode or "").strip().lower().replace("-", "_")
     return m in ("shadow", "live", "live_shadow")
+
+
+@dataclass
+class SymbolContext:
+    """
+    Per-symbol market + future strategy/position slices (multi-symbol ready).
+    Single active symbol uses one live market at a time.
+    """
+
+    symbol: str
+    market: Any = None
 
 
 class TradingSession:
@@ -88,6 +101,11 @@ class TradingSession:
         else:
             self.max_positions = getattr(self.config, "max_positions", 1)
 
+        # ---- symbol routing (single active; pending when position open) ----
+        self.symbol_contexts: Dict[str, SymbolContext] = {}
+        self.pending_symbol: Optional[str] = None
+        self.active_symbol: str = self._initial_symbol_from_config()
+        self._symbol_switch_lock = threading.Lock()
 
         if session_id is not None:
             self.id = str(session_id)
@@ -162,6 +180,136 @@ class TradingSession:
             "execution_deferred=", self._defer_execution_build,
             "has_recon=", hasattr(self, "reconciliation_hub"),
         )
+
+    def _initial_symbol_from_config(self) -> str:
+        if isinstance(self.config, dict):
+            s = self.config.get("symbol") or "BTCUSDT"
+        else:
+            s = getattr(self.config, "symbol", None) or "BTCUSDT"
+        s = str(s).strip().upper()
+        return s or "BTCUSDT"
+
+    @staticmethod
+    def _normalize_symbol(raw) -> Optional[str]:
+        if raw is None:
+            return None
+        s = str(raw).strip().upper()
+        return s if s else None
+
+    def _write_config_symbol(self, symbol: str) -> None:
+        if isinstance(self.config, dict):
+            self.config["symbol"] = symbol
+        elif hasattr(self.config, "symbol"):
+            setattr(self.config, "symbol", symbol)
+
+    def _has_open_position(self) -> bool:
+        se = getattr(self, "strategy_engine", None)
+        if se is not None and getattr(se, "position", None) is not None:
+            return True
+        eng = getattr(self, "engine", None)
+        sync = getattr(eng, "sync_engine", None) if eng else None
+        if sync is not None and hasattr(sync, "position"):
+            try:
+                for p in sync.position.get_all():
+                    sz = float(getattr(p, "size", 0) or 0)
+                    if abs(sz) > 1e-8:
+                        return True
+            except Exception:
+                pass
+        return False
+
+    def request_symbol_change(self, new_symbol: str) -> dict:
+        sym = self._normalize_symbol(new_symbol)
+        if not sym:
+            return {"status": "error", "reason": "invalid_symbol"}
+        if sym == self.active_symbol:
+            self.pending_symbol = None
+            return {"status": "noop", "active": sym}
+        if self._has_open_position():
+            self.pending_symbol = sym
+            return {
+                "status": "pending",
+                "pending": sym,
+                "active": self.active_symbol,
+            }
+        self._apply_symbol_switch(sym)
+        self.pending_symbol = None
+        return {"status": "applied", "active": self.active_symbol}
+
+    def _apply_symbol_switch(self, new_symbol: str) -> None:
+        self._write_config_symbol(new_symbol)
+        self.active_symbol = new_symbol
+
+        old_market = getattr(self, "market", None)
+        if old_market is not None and type(old_market).__name__ == "BinanceMarketAdapter":
+            from backend.adapters.market.binance_market_adapter import BinanceMarketAdapter
+            from backend.runtime.live_runner import LiveRunner
+
+            runner = getattr(self, "runner", None)
+            if runner is not None and runner.is_alive():
+                runner.stop()
+                runner.join(timeout=10.0)
+
+            if hasattr(old_market, "stop"):
+                old_market.stop()
+
+            tf = getattr(old_market, "tf", "5m")
+            new_market = BinanceMarketAdapter(new_symbol, tf)
+            self.symbol_contexts[new_symbol] = SymbolContext(
+                symbol=new_symbol, market=new_market
+            )
+
+            self.market = new_market
+            self.data_feed = new_market
+
+            se = getattr(self, "strategy_engine", None)
+            if se is not None:
+                se.market = new_market
+                from trading_core.engines.long_engine import LongEngine
+                from trading_core.engines.short_engine import ShortEngine
+
+                se.long_engine = LongEngine()
+                se.short_engine = ShortEngine()
+                se.position = None
+
+            new_runner = LiveRunner(self, new_market)
+            self.runner = new_runner
+            new_runner.start()
+            return
+
+        se = getattr(self, "strategy_engine", None)
+        if se is not None:
+            from trading_core.engines.long_engine import LongEngine
+            from trading_core.engines.short_engine import ShortEngine
+
+            se.long_engine = LongEngine()
+            se.short_engine = ShortEngine()
+            se.position = None
+
+    def try_apply_pending_symbol(self) -> bool:
+        runner = getattr(self, "runner", None)
+        if runner is not None and threading.current_thread() is runner:
+
+            def _bg():
+                try:
+                    self._try_apply_pending_symbol_impl()
+                except Exception as e:
+                    print("[SESSION] pending symbol apply failed:", e)
+
+            threading.Thread(target=_bg, daemon=True).start()
+            return True
+        return self._try_apply_pending_symbol_impl()
+
+    def _try_apply_pending_symbol_impl(self) -> bool:
+        with self._symbol_switch_lock:
+            sym = self.pending_symbol
+            if not sym:
+                return False
+            if self._has_open_position():
+                return False
+            self.pending_symbol = None
+            self._apply_symbol_switch(sym)
+            return True
 
     def _attach_execution_stack(self):
         if self._execution_attached:
@@ -278,6 +426,13 @@ class TradingSession:
             self.executor = executor
         self.data_feed = data_feed
         self.risk_system = risk_system
+
+        if data_feed is not None and type(data_feed).__name__ == "BinanceMarketAdapter":
+            dsym = self._normalize_symbol(getattr(data_feed, "symbol", None))
+            if dsym:
+                self.symbol_contexts[dsym] = SymbolContext(symbol=dsym, market=data_feed)
+                self.active_symbol = dsym
+                self._write_config_symbol(dsym)
 
         self.status = self.STATUS_READY
         self._emit_system("SESSION_READY")
