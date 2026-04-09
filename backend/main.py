@@ -25,6 +25,7 @@ from backend.analytics.metrics_engine import MetricsEngine
 from backend.analytics.dashboard_cache import DashboardCache
 from backend.api.routes_control import router as control_router
 from backend.api.routes_execution_monitor import router as execution_router
+from backend.api.routes_debug import router as debug_router
 from backend.observability.execution_recorder import init_db
 from backend.analytics.analytics_bus import analytics_bus
 from backend.observability.execution_monitor_instance import execution_monitor
@@ -78,6 +79,7 @@ app.include_router(metrics_router)
 app.include_router(alert_router)
 app.include_router(dashboard_router)
 app.include_router(execution_router)
+app.include_router(debug_router, prefix="/api/debug")
 
 # =========================
 # WS ROUTES

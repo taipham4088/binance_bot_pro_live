@@ -1,5 +1,6 @@
 import time
 import requests
+from copy import deepcopy
 from backend.runtime.exchange_config import exchange_config
 from backend.utils.symbol_utils import extract_quote_asset
 from backend.analytics.market_bias_engine import market_bias_engine
@@ -415,6 +416,126 @@ class DashboardCache:
             return self.trade_journal.get_last_trades(200)
         return []
 
+    @staticmethod
+    def _normalize_session_id(session_id: str | None) -> str:
+        if not session_id:
+            return "live"
+        return str(session_id).strip().lower()
+
+    @staticmethod
+    def _mode_matches_session(mode: str | None, session_id: str) -> bool:
+        if not mode:
+            return False
+        mode_norm = str(mode).strip().lower()
+        if session_id == "live":
+            return mode_norm == "live"
+        if session_id == "shadow":
+            return mode_norm == "shadow"
+        if session_id == "paper":
+            return mode_norm == "paper"
+        if session_id == "backtest":
+            return mode_norm == "backtest"
+        return False
+
+    @staticmethod
+    def _blank_position() -> dict:
+        return {"side": "flat", "size": 0}
+
+    @staticmethod
+    def _blank_risk_status(session_id: str | None) -> dict:
+        return {
+            "trade_allowed": False,
+            "blocked_rules": [],
+            "rules": {},
+            "session_id": session_id,
+            "daily_equity_risk": {},
+        }
+
+    def _filter_payload_by_session(
+        self,
+        payload: dict,
+        session_id: str | None,
+        dual_panel: bool,
+    ) -> dict:
+        out = deepcopy(payload)
+        pnl = out.get("pnl") or {}
+        panels = list(pnl.get("panels") or [])
+        target = self._normalize_session_id(session_id)
+
+        if dual_panel:
+            selected_panels = [
+                p for p in panels
+                if str(p.get("session_id", "")).lower() in ("live", "shadow")
+            ]
+            pnl["panels"] = selected_panels
+            pnl["session_status"] = "multi" if len(selected_panels) > 1 else "single"
+            pnl["session_label"] = "LIVE | SHADOW" if len(selected_panels) > 1 else None
+            pnl["mode"] = "MULTI" if len(selected_panels) > 1 else (selected_panels[0].get("mode") if selected_panels else None)
+            out["position"] = self._blank_position()
+            out["risk_status"] = self._blank_risk_status("live_shadow")
+            return out
+
+        panel = None
+        for p in panels:
+            if str(p.get("session_id", "")).lower() == target:
+                panel = p
+                break
+
+        manager = getattr(self.app_state, "manager", None) if self.app_state else None
+        session = None
+        if manager is not None:
+            session = (getattr(manager, "sessions", {}) or {}).get(target)
+
+        if panel is not None:
+            pnl["panels"] = [panel]
+            pnl["session_status"] = "single"
+            pnl["session_label"] = None
+            pnl["mode"] = panel.get("mode")
+            pnl["symbol"] = panel.get("symbol")
+            pnl["quote_asset"] = panel.get("quote_asset")
+            pnl["trading_quote_asset"] = panel.get("quote_asset")
+            pnl["floating_pnl"] = panel.get("floating")
+            pnl["equity"] = panel.get("equity")
+            pnl["total_equity"] = panel.get("total_equity")
+            pnl["exchange_wallet_quote"] = panel.get("exchange_wallet_quote")
+            pnl["exchange_wallet_usdt"] = panel.get("exchange_wallet_usdt")
+            pnl["account_equity"] = panel.get("account_equity")
+        else:
+            pnl["panels"] = []
+            pnl["session_status"] = "no_session"
+            pnl["session_label"] = f"No Active Session ({target.upper()})"
+            pnl["mode"] = target.upper()
+            pnl["symbol"] = None
+            pnl["quote_asset"] = None
+            pnl["trading_quote_asset"] = None
+            pnl["floating_pnl"] = None
+            pnl["equity"] = None
+            pnl["total_equity"] = None
+            pnl["exchange_wallet_quote"] = None
+            pnl["exchange_wallet_usdt"] = None
+            pnl["account_equity"] = None
+
+        if session is not None:
+            out["position"] = self._get_position_for_session(session)
+            out["risk_status"] = self._build_risk_status(session, pnl)
+            session_trades = []
+            try:
+                j = getattr(session.system_state, "trade_journal", None)
+                if j:
+                    session_trades = j.get_last_trades(200)
+            except Exception:
+                session_trades = []
+            out["recent_trades"] = session_trades
+        else:
+            out["position"] = self._blank_position()
+            out["risk_status"] = self._blank_risk_status(target)
+            out["recent_trades"] = [
+                t for t in list(out.get("recent_trades") or [])
+                if isinstance(t, dict) and self._mode_matches_session(t.get("mode"), target)
+            ]
+
+        return out
+
     # -------------------------
     # Refresh
     # -------------------------
@@ -611,9 +732,11 @@ class DashboardCache:
     # Get
     # -------------------------
 
-    def get(self):
+    def get(self, session_id: str | None = None, dual_panel: bool = False):
 
         if time.time() - self.last_update > 2:
             self.refresh()
 
+        if session_id or dual_panel:
+            return self._filter_payload_by_session(self.cache, session_id, dual_panel)
         return self.cache

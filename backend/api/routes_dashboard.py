@@ -13,7 +13,10 @@ router = APIRouter()
 async def get_dashboard(request: Request):
 
     cache = request.app.state.dashboard_cache
-    base = cache.get()
+    session_id = (request.query_params.get("session") or "live").strip().lower()
+    dual_raw = (request.query_params.get("dual") or "").strip().lower()
+    dual_panel = dual_raw in ("1", "true", "yes", "on")
+    base = cache.get(session_id=session_id, dual_panel=dual_panel)
 
     exec_monitor = execution_monitor.snapshot()
 
@@ -66,40 +69,50 @@ async def get_dashboard(request: Request):
 async def get_position(request: Request):
 
     cache = request.app.state.dashboard_cache
-
-    return cache.get()["position"]
+    session_id = (request.query_params.get("session") or "live").strip().lower()
+    dual_raw = (request.query_params.get("dual") or "").strip().lower()
+    dual_panel = dual_raw in ("1", "true", "yes", "on")
+    return cache.get(session_id=session_id, dual_panel=dual_panel)["position"]
 
 
 @router.get("/api/dashboard/pnl")
 async def get_pnl(request: Request):
 
     cache = request.app.state.dashboard_cache
-
-    return cache.get()["pnl"]
+    session_id = (request.query_params.get("session") or "live").strip().lower()
+    dual_raw = (request.query_params.get("dual") or "").strip().lower()
+    dual_panel = dual_raw in ("1", "true", "yes", "on")
+    return cache.get(session_id=session_id, dual_panel=dual_panel)["pnl"]
 
 
 @router.get("/api/dashboard/risk-status")
 async def get_risk_status(request: Request):
 
     cache = request.app.state.dashboard_cache
-
-    return cache.get().get("risk_status") or {}
+    session_id = (request.query_params.get("session") or "live").strip().lower()
+    dual_raw = (request.query_params.get("dual") or "").strip().lower()
+    dual_panel = dual_raw in ("1", "true", "yes", "on")
+    return cache.get(session_id=session_id, dual_panel=dual_panel).get("risk_status") or {}
 
 
 @router.get("/api/dashboard/metrics")
 async def get_metrics(request: Request):
 
     cache = request.app.state.dashboard_cache
-
-    return cache.get()["metrics"]
+    session_id = (request.query_params.get("session") or "live").strip().lower()
+    dual_raw = (request.query_params.get("dual") or "").strip().lower()
+    dual_panel = dual_raw in ("1", "true", "yes", "on")
+    return cache.get(session_id=session_id, dual_panel=dual_panel)["metrics"]
 
 
 @router.get("/api/dashboard/trades")
 async def get_trades(request: Request):
 
     cache = request.app.state.dashboard_cache
-
-    return cache.get()["recent_trades"]
+    session_id = (request.query_params.get("session") or "live").strip().lower()
+    dual_raw = (request.query_params.get("dual") or "").strip().lower()
+    dual_panel = dual_raw in ("1", "true", "yes", "on")
+    return cache.get(session_id=session_id, dual_panel=dual_panel)["recent_trades"]
 
 @router.get("/dashboard_v5")
 async def dashboard_v5():
@@ -118,24 +131,21 @@ async def dashboard_v7():
 async def get_trade_history(
     request: Request,
     session_id: str | None = None,
+    session: str | None = None,
     mode: str | None = None,
 ):
 
     import sqlite3
     from backend.storage.mode_storage import mode_storage
 
-    key = session_id or mode
+    key = (session_id or session or mode or "").strip().lower()
+    # Strict session isolation: no fallback to active session or shadow.
     if not key:
-        manager = request.app.state.manager
-        if manager.sessions:
-            if getattr(manager, "active_session_id", None) in manager.sessions:
-                key = manager.active_session_id
-            else:
-                key = next(iter(manager.sessions.keys()))
-        else:
-            key = "shadow"
+        return {"status": "ok", "history": []}
 
     db_path = mode_storage.get_trade_path(key)
+    if not db_path or not os.path.exists(db_path):
+        return {"status": "ok", "history": []}
 
     conn = sqlite3.connect(db_path)
     cursor = conn.cursor()

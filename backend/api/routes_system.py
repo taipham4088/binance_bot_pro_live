@@ -1,4 +1,5 @@
 import requests
+import inspect
 
 from trading_core.config.engine_config import EngineConfig
 from fastapi import APIRouter, Request, HTTPException
@@ -103,13 +104,95 @@ async def start_session(request: Request, session_id: str):
     
 
 @router.post("/session/stop/{session_id}")
-def stop_session(request: Request, session_id: str):
+async def stop_session(request: Request, session_id: str):
     manager = request.app.state.manager
     try:
+        session = manager.get(session_id)
+        if not session:
+            raise HTTPException(status_code=404, detail=f"Session not found: {session_id!r}")
+
+        print(f"[SESSION] stopping {session_id}")
+
+        print("[EXECUTION] stopping pipeline")
+
+        # stop strategy/signal loop runner first
+        runner = getattr(session, "runner", None)
+        if runner:
+            try:
+                runner.stop()
+                if runner.is_alive():
+                    runner.join(timeout=8)
+                print("[EXECUTION] signal loop stopped")
+            except Exception as e:
+                print("[EXECUTION] signal loop stop error:", e)
+
+        # stop websocket/feed
+        market = getattr(session, "market", None) or getattr(session, "data_feed", None)
+        if market and hasattr(market, "stop"):
+            try:
+                market.stop()
+            except Exception as e:
+                print("[EXECUTION] market stop error:", e)
+
+        # stop health loop + task
+        health_loop = getattr(session, "health_loop", None)
+        if health_loop:
+            try:
+                health_loop.stop()
+            except Exception:
+                pass
+        health_task = getattr(session, "health_task", None)
+        if health_task:
+            try:
+                health_task.cancel()
+            except Exception:
+                pass
+
+        # stop execution system deterministically (await if coroutine)
+        live_system = getattr(session, "live_system", None)
+        if live_system and hasattr(live_system, "stop"):
+            try:
+                ret = live_system.stop()
+                if inspect.isawaitable(ret):
+                    await ret
+                print("[EXECUTION] decision loop stopped")
+            except Exception as e:
+                print("[EXECUTION] live_system stop error:", e)
+
+        engine = getattr(session, "engine", None)
+        if engine and engine is not live_system and hasattr(engine, "stop"):
+            try:
+                ret = engine.stop()
+                if inspect.isawaitable(ret):
+                    await ret
+            except Exception as e:
+                print("[EXECUTION] engine stop error:", e)
+
         session = manager.stop_session(session_id)
+
+        # Ensure heartbeat loop is halted for true STOP state.
+        try:
+            if getattr(session, "system_state", None):
+                session.system_state.stop()
+        except Exception:
+            pass
+
+        runner_alive = bool(
+            getattr(session, "runner", None) and session.runner.is_alive()
+        )
+        ws_running = bool(
+            getattr(getattr(session, "market", None), "client", None)
+            and getattr(session.market.client, "running", False)
+        )
+
+        print("[EXECUTION] execution pipeline stopped")
+        print(f"[SESSION] stopped {session_id}")
+
         return {
             "session_id": session.id,
-            "status": session.status
+            "status": session.status,
+            "runner_alive": runner_alive,
+            "ws_running": ws_running,
         }
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))

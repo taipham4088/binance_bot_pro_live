@@ -1,6 +1,7 @@
 from fastapi import APIRouter
 from backend.observability.execution_monitor_instance import execution_monitor
 import sqlite3
+import os
 
 router = APIRouter(prefix="/api/execution", tags=["execution"])
 
@@ -60,29 +61,20 @@ def execution_monitor_snapshot():
 from backend.core.persistence.execution_journal import ExecutionJournal
 
 @router.get("/history")
-def execution_history(mode: str | None = None):
+def execution_history(session: str | None = None, mode: str | None = None):
 
     try:
 
         from backend.storage.mode_storage import mode_storage
-        from backend.main import app
-        import sqlite3
 
-        # get mode runtime
-        if not mode:
-            manager = app.state.manager
-            sessions = manager.sessions
+        # Strict session isolation: never fallback to active/first/shadow session.
+        mode_key = (session or mode or "").strip().lower()
+        if not mode_key:
+            return {"status": "ok", "history": []}
 
-            if sessions:
-                if getattr(manager, "active_session_id", None) in sessions:
-                    session = sessions[manager.active_session_id]
-                else:
-                    session = list(sessions.values())[0]
-                mode = getattr(session, "id", None) or session.mode
-            else:
-                mode = "shadow"
-
-        db_path = mode_storage.get_execution_path(mode)
+        db_path = mode_storage.get_execution_path(mode_key)
+        if not db_path or not os.path.exists(db_path):
+            return {"status": "ok", "history": []}
 
         conn = sqlite3.connect(db_path)
         cursor = conn.cursor()
@@ -132,8 +124,9 @@ def execution_history(mode: str | None = None):
         }
 
     except Exception as e:
-
+        # Missing table/db or any read issue should not fallback/cross-session.
         return {
-            "status": "error",
+            "status": "ok",
+            "history": [],
             "message": str(e)
         }

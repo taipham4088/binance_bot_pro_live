@@ -6,14 +6,14 @@
 <meta charset="UTF-8">
 <title>BOT PRO LIVE</title>
 
-<link rel="stylesheet" href="/dashboard/css/dashboard_v6.css">
+<link rel="stylesheet" href="/dashboard/css/dashboard_v6.css?v=8">
 
 <link href="https://cdn.jsdelivr.net/npm/gridstack@8.4.0/dist/gridstack.min.css" rel="stylesheet"/>
 
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/gridstack@8.4.0/dist/gridstack-all.js"></script>
 
-<script src="/dashboard/js/dashboard_v6.js?v=7" defer></script>
+<script src="/dashboard/js/dashboard_v6.js?v=8" defer></script>
 
 </head>
 
@@ -24,6 +24,21 @@
 <h1>BOT PRO LIVE</h1>
 
 <div class="header-buttons">
+
+<div class="session-controls">
+<label for="session_select">Session:</label>
+<select id="session_select" onchange="onSessionSelectionChanged()">
+<option value="live">LIVE</option>
+<option value="shadow">SHADOW</option>
+<option value="paper">PAPER</option>
+<option value="backtest">BACKTEST</option>
+</select>
+<label class="dual-panel-toggle">
+<input id="dual_panel_toggle" type="checkbox" onchange="onSessionSelectionChanged()">
+LIVE | SHADOW
+</label>
+<button onclick="openSessionControl()">Control</button>
+</div>
 
 <button onclick="openPanelManager()">Panels</button>
 <button onclick="resetLayout()">Reset Layout</button>
@@ -463,6 +478,37 @@ step="0.1"
 
 </div>
 
+</div>
+<div id="sessionControlModal" class="session-control-modal">
+<div class="session-control-box">
+<div class="session-control-header">
+<h3>SESSION CONTROL</h3>
+<button class="session-close-btn" onclick="closeSessionControl()">Close</button>
+</div>
+<div class="session-live-status">
+<div>LIVE: <span id="session_status_live">UNKNOWN</span></div>
+<div>SHADOW: <span id="session_status_shadow">UNKNOWN</span></div>
+</div>
+<div class="session-row">
+<div class="session-title">LIVE</div>
+<div class="session-actions">
+<button onclick="sessionAction('live', 'start', this)">Start</button>
+<button onclick="sessionAction('live', 'stop', this)">Stop</button>
+<button onclick="sessionAction('live', 'restart', this)">Restart</button>
+<button class="session-btn export" type="button" onclick="exportCandle('live')">Export</button>
+</div>
+</div>
+<div class="session-row">
+<div class="session-title">SHADOW</div>
+<div class="session-actions">
+<button onclick="sessionAction('shadow', 'start', this)">Start</button>
+<button onclick="sessionAction('shadow', 'stop', this)">Stop</button>
+<button onclick="sessionAction('shadow', 'restart', this)">Restart</button>
+<button class="session-btn export" type="button" onclick="exportCandle('shadow')">Export</button>
+</div>
+</div>
+<div id="session_control_status" class="session-control-status"></div>
+</div>
 </div>
 
 </body>

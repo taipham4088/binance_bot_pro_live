@@ -126,6 +126,147 @@ gap:10px;
 
 }
 
+.session-controls{
+display:flex;
+align-items:center;
+gap:8px;
+padding:4px 8px;
+border:1px solid #334155;
+border-radius:8px;
+background:#111827;
+}
+
+.session-controls label{
+font-size:12px;
+color:#cbd5e1;
+}
+
+.session-controls select{
+height:28px;
+padding:2px 8px;
+border-radius:6px;
+border:1px solid #475569;
+background:#0b1220;
+color:#e2e8f0;
+}
+
+.dual-panel-toggle{
+display:flex;
+align-items:center;
+gap:6px;
+white-space:nowrap;
+}
+
+.session-control-modal{
+position:fixed;
+inset:0;
+display:none;
+align-items:center;
+justify-content:center;
+background:rgba(0,0,0,0.55);
+z-index:1200;
+}
+
+.session-control-box{
+width:520px;
+max-width:90vw;
+background:#111827;
+border:1px solid #334155;
+border-radius:10px;
+padding:16px;
+}
+
+.session-control-header{
+display:flex;
+align-items:center;
+justify-content:space-between;
+margin-bottom:12px;
+}
+
+.session-control-header h3{
+margin:0;
+font-size:16px;
+}
+
+.session-live-status{
+display:flex;
+justify-content:space-between;
+gap:12px;
+margin-bottom:10px;
+padding:8px 10px;
+border:1px solid rgba(148,163,184,0.25);
+border-radius:8px;
+background:#0b1220;
+font-size:12px;
+}
+
+.session-live-status .running{
+color:#22c55e;
+font-weight:700;
+}
+
+.session-live-status .stopped{
+color:#ef4444;
+font-weight:700;
+}
+
+.session-live-status .unknown{
+color:#94a3b8;
+font-weight:700;
+}
+
+.session-close-btn{
+height:30px;
+padding:4px 10px;
+}
+
+.session-row{
+display:grid;
+grid-template-columns:120px 1fr;
+gap:10px;
+align-items:center;
+padding:10px 0;
+border-top:1px solid rgba(148,163,184,0.2);
+}
+
+.session-row:first-of-type{
+border-top:0;
+}
+
+.session-title{
+font-weight:700;
+letter-spacing:0.4px;
+}
+
+.session-actions{
+display:flex;
+flex-wrap:wrap;
+gap:8px;
+align-items:center;
+}
+
+.session-actions .session-btn.export{
+background:#2d7ef7;
+color:#fff;
+border:none;
+border-radius:6px;
+padding:4px 10px;
+font-size:12px;
+cursor:pointer;
+height:28px;
+}
+
+.session-actions .session-btn.export:hover{
+background:#1d6ae0;
+}
+
+.session-control-status{
+margin-top:10px;
+min-height:20px;
+font-size:12px;
+color:#cbd5e1;
+}
+
 .panel-manager{
 
 position:fixed;

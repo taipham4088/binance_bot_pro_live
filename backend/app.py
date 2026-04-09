@@ -17,6 +17,7 @@ from backend.control_plane.hooks_bridge.execution_hooks_bridge import ExecutionH
 from backend.core.run_manager import RunManager
 from backend.api.routes_backtest import router as backtest_router
 from backend.api.routes_system import router as system_router
+from backend.api.routes_debug import router as debug_router
 #from backend.api.routes_live import router as live_router
 from backend.core.state_hub import StateHub
 from backend.ws.state_ws import router as ws_router
@@ -85,6 +86,7 @@ app.include_router(system_router, prefix="/system")
 #app.include_router(live_router, prefix="/live")
 app.include_router(config_router, prefix="/system")
 app.include_router(session_router, prefix="/system")
+app.include_router(debug_router, prefix="/api/debug")
 
 # ✅ STATE API (health, check, snapshot…)
 app.include_router(state_router, prefix="/state")

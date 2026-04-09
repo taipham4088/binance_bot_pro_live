@@ -11,6 +11,292 @@ let skipNextControlPanelRefresh = false
 
 /** Server-backed values for control rows; pending UI = select/input value !== last applied */
 const lastAppliedControlValues = {}
+let selectedDashboardSession = "live"
+let dualPanelModeEnabled = false
+let dashboardRequestId = 0
+let tradesRequestId = 0
+let executionHistoryRequestId = 0
+const sessionRuntimeStatus = {
+  live: "UNKNOWN",
+  shadow: "UNKNOWN",
+}
+
+function sessionControlStatus(msg, isError = false) {
+  const el = document.getElementById("session_control_status")
+  if (!el) return
+  el.textContent = msg || ""
+  el.style.color = isError ? "#f87171" : "#cbd5e1"
+}
+
+function openSessionControl() {
+  const modal = document.getElementById("sessionControlModal")
+  if (!modal) return
+  modal.style.display = "flex"
+  sessionControlStatus("")
+  refreshSessionStatuses()
+}
+
+function closeSessionControl() {
+  const modal = document.getElementById("sessionControlModal")
+  if (!modal) return
+  modal.style.display = "none"
+}
+
+async function postSessionControl(path) {
+  const res = await fetch(path, { method: "POST" })
+  if (!res.ok) {
+    let detail = ""
+    try {
+      const body = await res.json()
+      detail = body?.detail ? `: ${body.detail}` : ""
+    } catch (_e) {
+      detail = ""
+    }
+    const err = new Error(`HTTP ${res.status}${detail}`)
+    err.status = res.status
+    err.detail = detail
+    throw err
+  }
+  return res.json().catch(() => ({}))
+}
+
+async function ensureSessionCreated(sessionId) {
+  try {
+    await postSessionControl(`/api/system/session/create?mode=${encodeURIComponent(sessionId)}`)
+  } catch (e) {
+    const msg = String(e?.message || "").toLowerCase()
+    const detail = String(e?.detail || "").toLowerCase()
+    // Idempotent create: ignore only "already exists" style errors.
+    if (
+      msg.includes("already exists") ||
+      msg.includes("exists") ||
+      detail.includes("already exists") ||
+      detail.includes("exists")
+    ) {
+      return
+    }
+    throw e
+  }
+}
+
+async function startSession(sessionId) {
+  await ensureSessionCreated(sessionId)
+  return postSessionControl(`/api/system/session/start/${encodeURIComponent(sessionId)}`)
+}
+
+async function stopSession(sessionId) {
+  return postSessionControl(`/api/system/session/stop/${encodeURIComponent(sessionId)}`)
+}
+
+async function sessionAction(sessionId, action, btn) {
+  const original = btn ? btn.textContent : ""
+  try {
+    if (btn) {
+      btn.disabled = true
+      btn.textContent = "..."
+    }
+    sessionControlStatus(`${action.toUpperCase()} ${sessionId.toUpperCase()} in progress...`)
+    if (action === "start") {
+      await startSession(sessionId)
+    } else if (action === "stop") {
+      await stopSession(sessionId)
+    } else if (action === "restart") {
+      await stopSession(sessionId)
+      await startSession(sessionId)
+    } else {
+      throw new Error(`Unsupported action: ${action}`)
+    }
+    sessionControlStatus(`${action.toUpperCase()} ${sessionId.toUpperCase()} success`)
+    await refreshSessionStatuses()
+    await refreshAfterLifecycleAction()
+  } catch (e) {
+    sessionControlStatus(`${action.toUpperCase()} ${sessionId.toUpperCase()} failed - ${e.message}`, true)
+    await refreshSessionStatuses()
+  } finally {
+    if (btn) {
+      btn.disabled = false
+      btn.textContent = original
+    }
+  }
+}
+
+async function exportCandle(session) {
+  const sid = String(session || "live").toLowerCase()
+  try {
+    const res = await fetch(
+      `/api/debug/export-candle?session=${encodeURIComponent(sid)}`
+    )
+    const data = await res.json()
+    if (data.ok) {
+      console.log("[EXPORT]", data)
+      console.log(`[CANDLE EXPORT] ${sid} ${data.rows} bars`)
+      sessionControlStatus(
+        `[CANDLE EXPORT] ${sid} ${data.rows} bars → ${data.path}`,
+        false
+      )
+      alert(
+        `Exported ${data.rows} bars\n` +
+        `File: ${data.path}`
+      )
+    } else {
+      sessionControlStatus(`Export failed: ${data.error || "unknown"}`, true)
+      alert("Export failed: " + (data.error || "unknown"))
+    }
+  } catch (err) {
+    console.error(err)
+    sessionControlStatus("Export error", true)
+    alert("Export error")
+  }
+}
+
+async function fetchJsonSafe(url) {
+  const res = await fetch(url)
+  if (!res.ok) {
+    throw new Error(`HTTP ${res.status} ${url}`)
+  }
+  return res.json()
+}
+
+async function refreshAllPanels() {
+  await loadDashboard()
+  await updateTrades()
+  await updateExecutionHistory()
+
+  const qp = getSessionQueryParams()
+  try {
+    const [position, pnl, risk] = await Promise.all([
+      fetchJsonSafe(`/api/dashboard/position?${qp}`),
+      fetchJsonSafe(`/api/dashboard/pnl?${qp}`),
+      fetchJsonSafe(`/api/dashboard/risk-status?${qp}`),
+    ])
+
+    updatePosition({ position })
+    updatePnL({ pnl })
+    updateRisk({ risk_status: risk, pnl })
+  } catch (e) {
+    console.log("refreshAllPanels partial refresh error", e)
+  }
+}
+
+async function refreshAfterLifecycleAction() {
+  await refreshAllPanels()
+  // Post-lifecycle state can settle asynchronously; perform short retries.
+  for (let i = 0; i < 2; i++) {
+    await new Promise((resolve) => setTimeout(resolve, 600))
+    await refreshAllPanels()
+  }
+}
+
+function normalizeSessionStatus(value) {
+  const s = String(value || "").trim().toUpperCase()
+  if (s === "RUNNING") return "RUNNING"
+  if (s === "STOPPED" || s === "IDLE" || s === "CREATED") return "STOPPED"
+  return "UNKNOWN"
+}
+
+function setSessionStatusEl(id, status) {
+  const el = document.getElementById(id)
+  if (!el) return
+  const text = normalizeSessionStatus(status)
+  el.textContent = text
+  if (id === "session_status_live") sessionRuntimeStatus.live = text
+  if (id === "session_status_shadow") sessionRuntimeStatus.shadow = text
+  el.classList.remove("running", "stopped", "unknown")
+  if (text === "RUNNING") el.classList.add("running")
+  else if (text === "STOPPED") el.classList.add("stopped")
+  else el.classList.add("unknown")
+}
+
+function readStatusFromSessionsPayload(payload, sessionId) {
+  if (!payload) return "UNKNOWN"
+  if (Array.isArray(payload)) {
+    const row = payload.find((x) => String(x?.id || x?.session_id || "").toLowerCase() === sessionId)
+    return row?.status || "UNKNOWN"
+  }
+  if (Array.isArray(payload.sessions)) {
+    const row = payload.sessions.find((x) => String(x?.id || x?.session_id || "").toLowerCase() === sessionId)
+    return row?.status || "UNKNOWN"
+  }
+  if (payload.sessions && typeof payload.sessions === "object") {
+    const row = payload.sessions[sessionId]
+    if (row && typeof row === "object") return row.status || "UNKNOWN"
+    if (typeof row === "string") return row
+  }
+  if (payload[sessionId] && typeof payload[sessionId] === "object") {
+    return payload[sessionId].status || "UNKNOWN"
+  }
+  return "UNKNOWN"
+}
+
+async function refreshSessionStatuses() {
+  try {
+    const res = await fetch("/api/system/sessions")
+    if (!res.ok) throw new Error(`HTTP ${res.status}`)
+    const data = await res.json()
+    setSessionStatusEl("session_status_live", readStatusFromSessionsPayload(data, "live"))
+    setSessionStatusEl("session_status_shadow", readStatusFromSessionsPayload(data, "shadow"))
+  } catch (_e) {
+    setSessionStatusEl("session_status_live", "UNKNOWN")
+    setSessionStatusEl("session_status_shadow", "UNKNOWN")
+  }
+}
+
+function getSessionQueryParams() {
+  const params = new URLSearchParams()
+  params.set("session", selectedDashboardSession)
+  if (dualPanelModeEnabled) {
+    params.set("dual", "1")
+  }
+  return params.toString()
+}
+
+function getTradeHistoryQueryParams() {
+  const params = new URLSearchParams()
+  // Always bind history to selected session (UI isolation).
+  params.set("session_id", selectedDashboardSession)
+  params.set("session", selectedDashboardSession)
+  return params.toString()
+}
+
+function getExecutionHistoryQueryParams() {
+  const params = new URLSearchParams()
+  // Never couple history to RUNNING/dual state; selected session only.
+  params.set("session", selectedDashboardSession)
+  return params.toString()
+}
+
+function hydrateSessionSelectorFromStorage() {
+  const savedSession = (localStorage.getItem("dashboard-session") || "live").toLowerCase()
+  const savedDual = localStorage.getItem("dashboard-dual-panel") === "1"
+  const select = document.getElementById("session_select")
+  const dual = document.getElementById("dual_panel_toggle")
+
+  selectedDashboardSession = savedSession
+  dualPanelModeEnabled = savedDual
+
+  if (select) {
+    const hasValue = Array.from(select.options).some((o) => o.value === savedSession)
+    select.value = hasValue ? savedSession : "live"
+    selectedDashboardSession = select.value
+  }
+
+  if (dual) {
+    dual.checked = savedDual
+    dualPanelModeEnabled = dual.checked
+  }
+}
+
+async function onSessionSelectionChanged() {
+  const select = document.getElementById("session_select")
+  const dual = document.getElementById("dual_panel_toggle")
+  selectedDashboardSession = select ? String(select.value || "live").toLowerCase() : "live"
+  dualPanelModeEnabled = dual ? dual.checked === true : false
+  localStorage.setItem("dashboard-session", selectedDashboardSession)
+  localStorage.setItem("dashboard-dual-panel", dualPanelModeEnabled ? "1" : "0")
+  await loadDashboard()
+  await updateTrades()
+  await updateExecutionHistory()
+}
 
 function markControlApplyCommitted(elementId, value) {
   skipNextControlPanelRefresh = true
@@ -92,8 +378,11 @@ document.addEventListener("DOMContentLoaded", function(){
 
   // Symbol list must exist before hydrating from /api/dashboard (avoids race → false “pending”).
   ;(async function bootstrapDashboardControlPanel() {
+    hydrateSessionSelectorFromStorage()
     await loadSymbols()
     await loadDashboard()
+    await updateTrades()
+    await updateExecutionHistory()
   })()
 
   // nếu bạn CHƯA chuyển hẳn sang WebSocket thì giữ polling
@@ -107,6 +396,15 @@ document.addEventListener("DOMContentLoaded", function(){
   initMarketWS()
   loadMarket()
   setInterval(loadMarket,5000)
+
+  const modal = document.getElementById("sessionControlModal")
+  if (modal) {
+    modal.addEventListener("click", function (e) {
+      if (e.target === modal) {
+        closeSessionControl()
+      }
+    })
+  }
 })
 
 function restoreLayout(){
@@ -151,12 +449,15 @@ localStorage.setItem("gridstack-layout",JSON.stringify(layout))
 async function loadDashboard(){
 
 try{
+const requestId = ++dashboardRequestId
+await refreshSessionStatuses()
 
-const res = await fetch("/api/dashboard")
+const res = await fetch(`/api/dashboard?${getSessionQueryParams()}`)
 
 if(!res.ok) return
 
 const data = await res.json()
+if(requestId !== dashboardRequestId) return
 console.log("dashboard data:",data)
 
 if(!data) return
@@ -726,9 +1027,11 @@ const table = document.querySelector("#trades tbody")
 if(!table) return
 
 try{
+const requestId = ++tradesRequestId
 
-const res = await fetch("/api/trades/history")
+const res = await fetch(`/api/trades/history?${getTradeHistoryQueryParams()}`)
 const data = await res.json()
+if(requestId !== tradesRequestId) return
 
 table.innerHTML=""
 
@@ -1294,6 +1597,24 @@ container.innerHTML = `
 }
 
 function updateExecutionPipeline(data){
+const selectedStatus = sessionRuntimeStatus[selectedDashboardSession] || "UNKNOWN"
+if(!dualPanelModeEnabled && selectedStatus !== "RUNNING"){
+const steps = [
+"signal",
+"decision",
+"risk",
+"order",
+"exchange",
+"fill",
+"position"
+]
+steps.forEach(s=>{
+const el = document.getElementById("p_"+s)
+if(!el) return
+el.classList.remove("active","done")
+})
+return
+}
 
 let stage = "signal"
 
@@ -1356,12 +1677,14 @@ done=false
 async function updateExecutionHistory(){
 
 try{
+const requestId = ++executionHistoryRequestId
 
-const res = await fetch("/api/execution/history")
+const res = await fetch(`/api/execution/history?${getExecutionHistoryQueryParams()}`)
 
 if(!res.ok) return
 
 const data = await res.json()
+if(requestId !== executionHistoryRequestId) return
 
 const table = document.querySelector("#execution_history_table tbody")
 

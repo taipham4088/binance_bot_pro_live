@@ -1,13 +1,17 @@
 import pandas as pd
 from trading_core.data.feature_builder import build_features
+from pathlib import Path
 
 class LiveFeatureEngine:
 
-    def __init__(self, min_bars: int = 300):
+    def __init__(self, min_bars: int = 300, session_id: str | None = None):
         self.df_5m = pd.DataFrame()
         self.df_1h = pd.DataFrame()
         self.min_bars = min_bars
-        self.last_price = None   
+        self.last_price = None
+        self.session_id = (session_id or "live").strip().lower()
+        self.bar_count = 0
+        self.export_every_n = 5
 
     # =========================
     # BOOTSTRAP
@@ -99,7 +103,74 @@ class LiveFeatureEngine:
         ]])
 
         i = len(self.df_5m) - 1
+        self.bar_count += 1
+        if self.bar_count % self.export_every_n == 0:
+            self._export_debug_csv()
         return i, self.df_5m.iloc[-1], self.df_5m
+
+    def export_now(self) -> int | None:
+        """Immediate debug export (latest up to 200 bars). Read-only; no trading impact."""
+        sid = (
+            "live"
+            if self.session_id == "live"
+            else "shadow"
+            if self.session_id == "shadow"
+            else self.session_id
+        )
+        try:
+            n = self._export_debug_csv(log_line=False)
+            if n is not None:
+                print(f"[CANDLE EXPORT] manual export {sid} {n} bars")
+            else:
+                print(f"[CANDLE EXPORT] manual export {sid} failed or empty")
+            return n
+        except Exception as e:
+            print("[CANDLE EXPORT ERROR]", e)
+            return None
+
+    def _export_debug_csv(self, *, log_line: bool = True) -> int | None:
+        try:
+            sid = "live" if self.session_id == "live" else "shadow" if self.session_id == "shadow" else self.session_id
+            out_dir = Path("data") / "debug"
+            out_dir.mkdir(parents=True, exist_ok=True)
+            out_path = out_dir / f"candle_{sid}.csv"
+
+            df = self.df_5m.copy()
+            if df.empty:
+                return None
+
+            # Keep debug export compact and predictable.
+            df = df.sort_values("time").tail(200).reset_index(drop=True)
+
+            base_cols = [
+                "time", "open", "high", "low", "close", "volume",
+                "ema200", "close_1h", "valid_long", "valid_short",
+                "range_high", "range_low",
+                "break_up_id", "break_down_id",
+                "bars_since_break_up", "bars_since_break_down",
+            ]
+            keep = [c for c in base_cols if c in df.columns]
+
+            # Ensure required columns always exist in output.
+            required = [
+                "time", "open", "high", "low", "close", "volume",
+                "ema200", "close_1h", "valid_long", "valid_short",
+                "range_high", "range_low",
+            ]
+            for col in required:
+                if col not in keep:
+                    df[col] = None
+                    keep.append(col)
+
+            # Stable column order: required first, then optional extras present.
+            ordered = required + [c for c in keep if c not in required]
+            df[ordered].to_csv(out_path, index=False)
+            n = len(df)
+            if log_line:
+                print(f"[CANDLE EXPORT] {sid} exported {n} bars")
+            return n
+        except Exception:
+            return None
 
     # =========================
     # BUILD H1 CONTEXT

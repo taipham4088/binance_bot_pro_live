@@ -1,17 +1,19 @@
+# Python
 __pycache__/
 *.pyc
 *.pyo
 *.pyd
 
-venv/
-.env
+# Runtime data
+data/debug/
+data/session_meta/
 
-*.db
-*.sqlite
+# Logs
 *.log
 
-data/live/*
-data/shadow/*
-data/live_shadow/*
+# Environment
+.env
 
-node_modules/
+# OS
+.DS_Store
+Thumbs.db

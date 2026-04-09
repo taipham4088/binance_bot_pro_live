@@ -48,7 +48,7 @@ class LiveService:
             loop.create_task(live_system.start())
 
         # ===== live ports =====
-        market = BinanceMarketAdapter(symbol, timeframe)
+        market = BinanceMarketAdapter(symbol, timeframe, session_id=session.id)
         mode_router = ModeRouter(
             mode=session.config.mode,
             live_system=live_system,
