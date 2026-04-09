@@ -8,6 +8,7 @@ from backend.core.execution_timeline import (
 )
 from backend.core.state_hub import StateHub
 
+import math
 import time
 
 
@@ -108,3 +109,52 @@ class SessionRuntime:
 
         delta = self.timeline.step(last_decision)
         await self.statehub.emit_delta(self.session_id, delta)
+
+
+def _coerce_positive_risk_fraction(value):
+    try:
+        x = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(x) or x <= 0:
+        return None
+    return x
+
+
+def sync_dashboard_risk_to_all_sessions(manager) -> None:
+    """
+    Push runtime_config['risk_percent'] into each host TradingSession's
+    risk_config (risk_per_trade). No-op if manager missing or value invalid.
+    """
+    from backend.runtime.runtime_config import runtime_config
+
+    rp = _coerce_positive_risk_fraction(runtime_config.get("risk_percent"))
+    if rp is None or manager is None:
+        return
+    for session in list(manager.sessions.values()):
+        session.set_risk_config({"risk_per_trade": rp})
+
+
+def _normalize_dashboard_symbol(value) -> str | None:
+    if value is None:
+        return None
+    s = str(value).strip().upper()
+    return s if s else None
+
+
+def sync_dashboard_symbol_to_all_sessions(manager, symbol: str | None = None) -> list:
+    """
+    Push control-panel symbol to each TradingSession (pending if position open).
+    If symbol is None, uses runtime_config['symbol'].
+    """
+    from backend.runtime.runtime_config import runtime_config
+
+    sym = _normalize_dashboard_symbol(symbol)
+    if sym is None:
+        sym = _normalize_dashboard_symbol(runtime_config.get("symbol"))
+    if not sym or manager is None:
+        return []
+    out = []
+    for sid, session in list(manager.sessions.items()):
+        out.append({"session_id": sid, **session.request_symbol_change(sym)})
+    return out

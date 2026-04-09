@@ -1,7 +1,11 @@
-from fastapi import APIRouter
+from fastapi import APIRouter, Body, Request
+
+from backend.core.session_runtime import (
+    sync_dashboard_risk_to_all_sessions,
+    sync_dashboard_symbol_to_all_sessions,
+)
 from backend.runtime.runtime_config import runtime_config, save_runtime_config
 from backend.runtime.exchange_config import exchange_config
-from fastapi import Body
 
 router = APIRouter()
 
@@ -18,9 +22,10 @@ def resume_bot():
     return {"status": "running"}
 
 @router.post("/control/risk")
-def set_risk(data: dict = Body(...)):
+def set_risk(request: Request, data: dict = Body(...)):
     runtime_config["risk_percent"] = data.get("risk")
     save_runtime_config()
+    sync_dashboard_risk_to_all_sessions(getattr(request.app.state, "manager", None))
     return runtime_config
 
 @router.post("/control/trade_mode")
@@ -42,10 +47,14 @@ def set_exchange(data: dict = Body(...)):
     return runtime_config
 
 @router.post("/control/symbol")
-def set_symbol(data: dict = Body(...)):
+def set_symbol(request: Request, data: dict = Body(...)):
     runtime_config["symbol"] = data.get("symbol")
     save_runtime_config()
-    return runtime_config
+    results = sync_dashboard_symbol_to_all_sessions(
+        getattr(request.app.state, "manager", None),
+        symbol=runtime_config.get("symbol"),
+    )
+    return {**runtime_config, "sessions": results}
 
 
 import requests

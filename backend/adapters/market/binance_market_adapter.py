@@ -86,6 +86,13 @@ class BinanceMarketAdapter(MarketPort):
         if not self.thread.is_alive():
             self.thread.start()
 
+    def stop(self):
+        if getattr(self, "client", None):
+            self.client.stop()
+        th = getattr(self, "thread", None)
+        if th is not None and th.is_alive():
+            th.join(timeout=8.0)
+
     # ===== internal =====
 
     def _start_ws(self):

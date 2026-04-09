@@ -1,7 +1,7 @@
 {
   "trading_enabled": true,
   "exchange": "binance",
-  "symbol": "BTCUSDT",
+  "symbol": "ETHUSDT",
   "mode": "live",
   "risk_percent": 0.02,
   "trade_mode": "both",

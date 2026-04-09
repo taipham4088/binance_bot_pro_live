@@ -57,6 +57,7 @@ async def create_session(req: Request, payload: CreateSessionRequest):
         config={
             "symbol": sym,
             "engine": payload.engine,
+            "risk_per_trade": runtime_config.get("risk_percent", 0.01),
         },
         app=req.app,
         session_id=sid,

@@ -80,5 +80,8 @@ class LiveRunner(threading.Thread):
                 last_trade = engine.trades[-1]
                 state = bus.on_trade(last_trade)
 
+            if getattr(self.session, "try_apply_pending_symbol", None):
+                self.session.try_apply_pending_symbol()
+
     def stop(self):
         self.running = False
