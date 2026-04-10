@@ -1,6 +1,6 @@
 import threading
 
-from fastapi import APIRouter, Request, HTTPException, Body
+from fastapi import APIRouter, Request, HTTPException, Body, Query
 from pydantic import BaseModel
 
 from trading_core.config.engine_config import EngineConfig
@@ -109,22 +109,6 @@ def _set_session_initial_balance(session, value: float) -> None:
         setattr(c, "initial_balance", float(value))
 
 
-def _resolve_session_for_config(manager):
-    """Active session, else session matching control-panel mode, else any session."""
-    session = manager.get_active()
-    if session:
-        return session
-    mode_raw = runtime_config.get("mode")
-    if mode_raw:
-        sid = canonical_session_id(str(mode_raw).strip().lower().replace("-", "_"))
-        session = manager.get(sid)
-        if session:
-            return session
-    if manager.sessions:
-        return next(iter(manager.sessions.values()))
-    return None
-
-
 def _session_id_from_control_payload(payload: dict) -> str:
     mode = payload.get("mode")
     if mode is None or str(mode).strip() == "":
@@ -171,13 +155,23 @@ async def create_session(req: Request, payload: CreateSessionRequest):
     if effective_mode in ("paper", "backtest"):
         defer = True
 
+    config = {
+        "symbol": sym,
+        "engine": payload.engine or runtime_config.get("strategy", "range_trend"),
+        "risk_per_trade": runtime_config.get("risk_percent", 0.01),
+        "trade_mode": runtime_config.get("trade_mode", "dual"),
+        "initial_balance": runtime_config.get("initial_balance", 10000),
+    }
+    print("[SESSION CREATE CONFIG]")
+    print("mode =", effective_mode)
+    print("trade_mode =", config.get("trade_mode"))
+    print("risk =", config.get("risk_per_trade"))
+    print("strategy =", config.get("engine"))
+    print("balance =", config.get("initial_balance"))
+
     session = manager.create_session(
         mode=effective_mode,
-        config={
-            "symbol": sym,
-            "engine": payload.engine,
-            "risk_per_trade": runtime_config.get("risk_percent", 0.01),
-        },
+        config=config,
         app=req.app,
         session_id=sid,
         defer_execution=defer,
@@ -206,27 +200,72 @@ async def list_sessions(req: Request):
     return result
 
 
-@router.post("/config")
-async def update_session_config(req: Request, payload: dict = Body(...)):
-    manager = req.app.state.manager
-    session = _resolve_session_for_config(manager)
+def _public_control_config_from_session(session) -> dict:
+    """Control-panel fields for dashboard; supports dict or EngineConfig on session.config."""
+    c = session.config
+    if isinstance(c, dict):
+        return {
+            "trade_mode": str(c.get("trade_mode") or "dual"),
+            "risk_percent": float(
+                c.get("risk_per_trade", c.get("risk_percent", 0.01)) or 0.01
+            ),
+            "initial_balance": float(c.get("initial_balance", 10000) or 10000),
+            "strategy": str(c.get("engine") or c.get("strategy") or "range_trend"),
+        }
+    _ensure_engine_config(session)
+    c = session.config
+    strategy = getattr(c, "engine", None) or getattr(c, "strategy", None) or "range_trend"
+    return {
+        "trade_mode": str(getattr(c, "trade_mode", None) or "dual"),
+        "risk_percent": float(getattr(c, "risk_per_trade", 0.01) or 0.01),
+        "initial_balance": float(getattr(c, "initial_balance", 10000) or 10000),
+        "strategy": str(strategy),
+    }
 
-    if not session:
-        return {"status": "no session"}
+
+@router.get("/config")
+async def get_session_config(req: Request, session: str = Query(..., description="Session id, e.g. live, backtest")):
+    manager = req.app.state.manager
+    sid = canonical_session_id(session)
+    sess = manager.get(sid)
+    if not sess:
+        return {"error": "session not found"}
+    return _public_control_config_from_session(sess)
+
+
+@router.post("/config")
+async def update_session_config(
+    req: Request,
+    session: str = Query(..., description="Target session id, e.g. live, backtest"),
+    payload: dict = Body(...),
+):
+    manager = req.app.state.manager
+    sid = canonical_session_id(session)
+    sess = manager.get(sid)
+    if not sess:
+        return {"error": "session not found"}
+
+    _ensure_engine_config(sess)
 
     print("[CONTROL PANEL APPLY]")
     print("payload =", payload)
-    print("session =", session.id)
-    print("config_before =", session.config)
+    print("session =", sess.id)
+    print("config_before =", sess.config)
 
     if "initial_balance" in payload:
-        try:
-            _set_session_initial_balance(session, float(payload["initial_balance"]))
-        except (TypeError, ValueError):
-            raise HTTPException(status_code=400, detail="initial_balance must be a number")
+        sess.config.initial_balance = payload["initial_balance"]
+
+    if "trade_mode" in payload:
+        sess.config.trade_mode = payload["trade_mode"]
+
+    if "risk_percent" in payload:
+        sess.config.risk_per_trade = payload["risk_percent"]
+
+    if "strategy" in payload:
+        sess.config.engine = payload["strategy"]
 
     print("[CONTROL PANEL UPDATED]")
-    print("config_after =", session.config)
+    print("config_after =", sess.config)
     return {"status": "updated"}
 
 
@@ -272,6 +311,18 @@ async def session_control_start(req: Request, payload: dict = Body(...)):
     manager = req.app.state.manager
     session = _get_session_for_control(manager, payload)
     _ensure_engine_config(session)
+    if hasattr(session.config, "trade_mode"):
+        session.config.trade_mode = runtime_config.get("trade_mode", session.config.trade_mode)
+    if hasattr(session.config, "risk_per_trade"):
+        session.config.risk_per_trade = runtime_config.get("risk_percent", session.config.risk_per_trade)
+    if hasattr(session.config, "engine"):
+        session.config.engine = runtime_config.get("strategy", session.config.engine)
+    if hasattr(session.config, "initial_balance"):
+        session.config.initial_balance = runtime_config.get("initial_balance", session.config.initial_balance)
+    print("[SESSION CONFIG]")
+    print(session.config)
+    print("[SESSION START CONFIG]")
+    print(session.config)
 
     if session.mode == "paper":
         paper_service.start(session=session, csv_path=_DEFAULT_SESSION_CSV)

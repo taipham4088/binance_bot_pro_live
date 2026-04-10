@@ -284,6 +284,115 @@ async function fetchJsonSafe(url) {
   return res.json()
 }
 
+function collectSessionConfigPayload() {
+  const tradeMode = document.getElementById("trade_mode_select")?.value
+  const riskRaw = document.getElementById("risk_input")?.value
+  const initialRaw = document.getElementById("initial_balance")?.value
+  const strategy = document.getElementById("strategy_select")?.value
+  return {
+    trade_mode: tradeMode,
+    risk_percent: Number(riskRaw),
+    initial_balance: Number(initialRaw),
+    strategy,
+  }
+}
+
+async function syncSessionConfigFromControlPanel() {
+  const payload = collectSessionConfigPayload()
+  const sid = selectedDashboardSession || "live"
+  const res = await fetch(
+    `/api/session/config?session=${encodeURIComponent(sid)}`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(payload),
+    }
+  )
+  let body = {}
+  try {
+    body = await res.json()
+  } catch (_err) {
+    body = {}
+  }
+  if (!res.ok || body.error) {
+    const detail =
+      body?.detail != null
+        ? `: ${body.detail}`
+        : body?.error != null
+          ? `: ${body.error}`
+          : ""
+    throw new Error(`HTTP ${res.status}${detail}`)
+  }
+}
+
+/** Hydrate trade_mode / risk / balance / strategy from the selected session (not global runtime_config). */
+async function loadSessionConfig() {
+  const sid = selectedDashboardSession || "live"
+  try {
+    const res = await fetch(`/api/session/config?session=${encodeURIComponent(sid)}`)
+    const data = await res.json().catch(() => ({}))
+    if (!res.ok || data.error) {
+      return
+    }
+
+    const tm = document.getElementById("trade_mode_select")
+    if (tm && data.trade_mode != null && String(data.trade_mode) !== "") {
+      const nv = normalizeDashboardTradeMode(data.trade_mode)
+      if (Array.from(tm.options).some((o) => o.value === nv)) {
+        tm.value = nv
+      }
+    }
+
+    const ri = document.getElementById("risk_input")
+    if (
+      ri &&
+      data.risk_percent !== undefined &&
+      data.risk_percent !== null &&
+      !Number.isNaN(Number(data.risk_percent))
+    ) {
+      ri.value = String(data.risk_percent)
+    }
+
+    const ib = document.getElementById("initial_balance")
+    if (
+      ib &&
+      data.initial_balance !== undefined &&
+      data.initial_balance !== null &&
+      !Number.isNaN(Number(data.initial_balance))
+    ) {
+      ib.value = String(data.initial_balance)
+    }
+
+    const ss = document.getElementById("strategy_select")
+    if (ss && data.strategy != null && String(data.strategy) !== "") {
+      const raw = String(data.strategy)
+      const norm = normalizeDashboardStrategy(raw)
+      const pick = Array.from(ss.options).some((o) => o.value === raw) ? raw : norm
+      if (Array.from(ss.options).some((o) => o.value === pick)) {
+        ss.value = pick
+      }
+    }
+
+    syncControlLastAppliedFromConfig({
+      trade_mode: data.trade_mode,
+      risk_percent: data.risk_percent,
+      strategy: data.strategy,
+    })
+    if (
+      data.initial_balance !== undefined &&
+      data.initial_balance !== null &&
+      !Number.isNaN(Number(data.initial_balance))
+    ) {
+      lastAppliedControlValues["initial_balance"] = String(Number(data.initial_balance))
+    }
+    refreshControlApplyButtonStates()
+  } catch (_e) {
+    /* session may not exist yet */
+  }
+}
+
 async function refreshAllPanels() {
   await loadDashboard()
   await updateTrades()
@@ -431,6 +540,7 @@ async function onSessionSelectionChanged() {
   localStorage.setItem("dashboard-session", selectedDashboardSession)
   localStorage.setItem("dashboard-dual-panel", dualPanelModeEnabled ? "1" : "0")
   await loadDashboard()
+  await loadSessionConfig()
   await updateTrades()
   await updateExecutionHistory()
 }
@@ -549,26 +659,7 @@ document.addEventListener("DOMContentLoaded", function(){
     const btn = document.getElementById("apply_initial_balance")
     const value = el?.value
     try {
-      const res = await fetch("/api/session/config", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          initial_balance: Number(value),
-        }),
-      })
-      if (!res.ok) {
-        let detail = ""
-        try {
-          const body = await res.json()
-          detail = body?.detail != null ? `: ${body.detail}` : ""
-        } catch (_err) {
-          detail = ""
-        }
-        console.error("initial_balance apply failed", res.status, detail)
-        return
-      }
+      await syncSessionConfigFromControlPanel()
       markControlApplyCommitted("initial_balance", String(Number(value)))
       if (btn) flashButton(btn)
     } catch (e) {
@@ -779,6 +870,8 @@ updateAlerts(data)
 updateExecutionPipeline(data)
 updateExecutionHistory()
 updateOrderLifecycle(data)
+
+await loadSessionConfig()
 
 }catch(e){
 
@@ -2059,6 +2152,7 @@ headers:{
 },
 body:JSON.stringify({risk:parseFloat(risk)})
 })
+await syncSessionConfigFromControlPanel()
 
 markControlApplyCommitted("risk_input", risk)
 
@@ -2086,6 +2180,7 @@ headers:{
 },
 body:JSON.stringify({mode})
 })
+await syncSessionConfigFromControlPanel()
 
 markControlApplyCommitted("trade_mode_select", mode)
 
@@ -2140,6 +2235,7 @@ headers:{
 },
 body:JSON.stringify({strategy})
 })
+await syncSessionConfigFromControlPanel()
 
 markControlApplyCommitted("strategy_select", strategy)
 

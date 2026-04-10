@@ -62,6 +62,8 @@ class DualEngine:
         self.short_enabled = getattr(self.config, "trade_mode", "dual") in ("short", "dual")
         print("[DUAL ENGINE INIT]")
         print("trade_mode =", getattr(config, "trade_mode", None))
+        print("[DUAL INIT MODE]")
+        print(getattr(config, "trade_mode", None))
         print("[DUAL ENGINE CONFIG]")
         print("trade_mode =", getattr(config, "trade_mode", None))
         print("risk =", getattr(config, "risk_per_trade", None))
@@ -96,6 +98,8 @@ class DualEngine:
         print("[ENGINE MODE]")
         print("long_enabled =", self.long_enabled)
         print("short_enabled =", self.short_enabled)
+        print("[ON BAR MODE]")
+        print(self.long_enabled, self.short_enabled)
 
         time = row["time"]
         day = time.date()

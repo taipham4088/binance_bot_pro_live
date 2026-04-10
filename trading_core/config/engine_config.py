@@ -28,3 +28,7 @@ class EngineConfig:
 
     # time
     timezone_offset_hours: int = 7
+
+    def __post_init__(self):
+        print("[ENGINE CONFIG INIT]")
+        print(self.trade_mode)
