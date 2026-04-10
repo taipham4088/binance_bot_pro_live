@@ -5,6 +5,28 @@ from backend.core.session_runtime import (
     sync_dashboard_symbol_to_all_sessions,
 )
 from backend.runtime.runtime_config import runtime_config, save_runtime_config
+
+_LEGACY_STRATEGY = frozenset({"range", "trend", "momentum", "dual_engine"})
+
+
+def _normalize_persisted_strategy(value) -> str:
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return "range_trend"
+    n = str(value).strip().lower()
+    if n in _LEGACY_STRATEGY:
+        return "range_trend"
+    return "range_trend"
+
+
+def _normalize_trade_mode(value) -> str:
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return "dual"
+    n = str(value).strip().lower()
+    if n == "both":
+        return "dual"
+    if n in ("long", "short", "dual"):
+        return n
+    return "dual"
 from backend.runtime.exchange_config import exchange_config
 
 router = APIRouter()
@@ -30,13 +52,13 @@ def set_risk(request: Request, data: dict = Body(...)):
 
 @router.post("/control/trade_mode")
 def set_trade_mode(data: dict = Body(...)):
-    runtime_config["trade_mode"] = data.get("mode")
+    runtime_config["trade_mode"] = _normalize_trade_mode(data.get("mode"))
     save_runtime_config()
     return runtime_config
 
 @router.post("/control/strategy")
 def set_strategy(data: dict = Body(...)):
-    runtime_config["strategy"] = data.get("strategy")
+    runtime_config["strategy"] = _normalize_persisted_strategy(data.get("strategy"))
     save_runtime_config()
     return runtime_config
 

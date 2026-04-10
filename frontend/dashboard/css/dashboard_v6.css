@@ -190,6 +190,7 @@ font-size:16px;
 
 .session-live-status{
 display:flex;
+flex-wrap:wrap;
 justify-content:space-between;
 gap:12px;
 margin-bottom:10px;
@@ -218,6 +219,50 @@ font-weight:700;
 .session-close-btn{
 height:30px;
 padding:4px 10px;
+}
+
+.session-control .session-row{
+display:flex;
+flex-wrap:wrap;
+align-items:center;
+gap:8px;
+padding:10px 0;
+border-top:1px solid rgba(148,163,184,0.2);
+}
+
+.session-control .session-row:first-child{
+border-top:0;
+}
+
+.session-control .session-row > span:first-of-type{
+min-width:88px;
+font-weight:700;
+letter-spacing:0.4px;
+}
+
+.session-control .session-row button{
+height:28px;
+padding:4px 10px;
+font-size:12px;
+cursor:pointer;
+border-radius:6px;
+border:1px solid rgba(148,163,184,0.35);
+background:#1e293b;
+color:#e2e8f0;
+}
+
+.session-control .session-row button:hover{
+background:#334155;
+}
+
+.session-control .session-row button[data-action="export"]{
+background:#2d7ef7;
+color:#fff;
+border:none;
+}
+
+.session-control .session-row button[data-action="export"]:hover{
+background:#1d6ae0;
 }
 
 .session-row{

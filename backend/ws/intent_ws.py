@@ -40,7 +40,9 @@ async def ws_intent(websocket: WebSocket, session_id: str):
             # TRADE MODE GUARD
             # =========================
 
-            trade_mode = runtime_config.get("trade_mode", "both")
+            trade_mode = runtime_config.get("trade_mode", "dual")
+            if trade_mode == "both":
+                trade_mode = "dual"
             side = payload.get("side")
 
             if trade_mode == "long" and side == "SHORT":

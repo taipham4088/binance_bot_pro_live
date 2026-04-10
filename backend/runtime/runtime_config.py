@@ -31,8 +31,8 @@ _DEFAULTS: Dict[str, Any] = {
     "symbol": "BTCUSDT",
     "mode": "shadow",
     "risk_percent": 0.01,
-    "trade_mode": "both",
-    "strategy": "dual_engine",
+    "trade_mode": "dual",
+    "strategy": "range_trend",
 }
 
 
@@ -81,6 +81,11 @@ def _load_file_into(target: Dict[str, Any]) -> None:
     # Older JSON files may omit exchange; coerce can leave empty string
     if not target.get("exchange"):
         target["exchange"] = _DEFAULTS["exchange"]
+    if target.get("trade_mode") == "both":
+        target["trade_mode"] = "dual"
+    _legacy_strategy = frozenset({"range", "trend", "momentum", "dual_engine"})
+    if target.get("strategy") in _legacy_strategy:
+        target["strategy"] = "range_trend"
 
 
 def save_runtime_config() -> None:

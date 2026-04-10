@@ -6,14 +6,14 @@
 <meta charset="UTF-8">
 <title>BOT PRO LIVE</title>
 
-<link rel="stylesheet" href="/dashboard/css/dashboard_v6.css?v=8">
+<link rel="stylesheet" href="/dashboard/css/dashboard_v6.css?v=9">
 
 <link href="https://cdn.jsdelivr.net/npm/gridstack@8.4.0/dist/gridstack.min.css" rel="stylesheet"/>
 
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/gridstack@8.4.0/dist/gridstack-all.js"></script>
 
-<script src="/dashboard/js/dashboard_v6.js?v=8" defer></script>
+<script src="/dashboard/js/dashboard_v6.js?v=10" defer></script>
 
 </head>
 
@@ -232,7 +232,7 @@ step="0.1"
 <label>Trade Mode</label>
 
 <select id="trade_mode_select" onchange="pendingButton('trade_mode_select')">
-<option value="both">BOTH</option>
+<option value="dual">DUAL</option>
 <option value="long">LONG</option>
 <option value="short">SHORT</option>
 </select>
@@ -263,9 +263,7 @@ step="0.1"
 <label>Strategy</label>
 
 <select id="strategy_select" onchange="pendingButton('strategy_select')">
-<option value="trend">TREND</option>
-<option value="range">RANGE</option>
-<option value="momentum">MOMENTUM</option>
+<option value="range_trend">RANGE TREND</option>
 </select>
 
 <button onclick="setStrategy(this)">Apply</button>
@@ -488,24 +486,43 @@ step="0.1"
 <div class="session-live-status">
 <div>LIVE: <span id="session_status_live">UNKNOWN</span></div>
 <div>SHADOW: <span id="session_status_shadow">UNKNOWN</span></div>
+<div>PAPER: <span id="session_status_paper">UNKNOWN</span></div>
+<div>BACKTEST: <span id="session_status_backtest">UNKNOWN</span></div>
 </div>
+<div class="session-control">
+
 <div class="session-row">
-<div class="session-title">LIVE</div>
-<div class="session-actions">
-<button onclick="sessionAction('live', 'start', this)">Start</button>
-<button onclick="sessionAction('live', 'stop', this)">Stop</button>
-<button onclick="sessionAction('live', 'restart', this)">Restart</button>
-<button class="session-btn export" type="button" onclick="exportCandle('live')">Export</button>
+<span>LIVE</span>
+<button data-session="live" data-action="start">Start</button>
+<button data-session="live" data-action="stop">Stop</button>
+<button data-session="live" data-action="restart">Restart</button>
+<button data-session="live" data-action="export">Export</button>
 </div>
-</div>
+
 <div class="session-row">
-<div class="session-title">SHADOW</div>
-<div class="session-actions">
-<button onclick="sessionAction('shadow', 'start', this)">Start</button>
-<button onclick="sessionAction('shadow', 'stop', this)">Stop</button>
-<button onclick="sessionAction('shadow', 'restart', this)">Restart</button>
-<button class="session-btn export" type="button" onclick="exportCandle('shadow')">Export</button>
+<span>SHADOW</span>
+<button data-session="shadow" data-action="start">Start</button>
+<button data-session="shadow" data-action="stop">Stop</button>
+<button data-session="shadow" data-action="restart">Restart</button>
+<button data-session="shadow" data-action="export">Export</button>
 </div>
+
+<div class="session-row">
+<span>PAPER</span>
+<button data-session="paper" data-action="start">Start</button>
+<button data-session="paper" data-action="stop">Stop</button>
+<button data-session="paper" data-action="restart">Restart</button>
+<button data-session="paper" data-action="export">Export</button>
+</div>
+
+<div class="session-row">
+<span>BACKTEST</span>
+<button data-session="backtest" data-action="start">Start</button>
+<button data-session="backtest" data-action="stop">Stop</button>
+<button data-session="backtest" data-action="restart">Restart</button>
+<button data-session="backtest" data-action="export">Export</button>
+</div>
+
 </div>
 <div id="session_control_status" class="session-control-status"></div>
 </div>

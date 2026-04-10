@@ -4,6 +4,6 @@
   "symbol": "BTCUSDT",
   "mode": "live",
   "risk_percent": 0.02,
-  "trade_mode": "both",
-  "strategy": "range"
+  "trade_mode": "dual",
+  "strategy": "range_trend"
 }

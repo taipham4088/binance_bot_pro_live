@@ -3,6 +3,18 @@ from backend.control_plane.engine_registry.engine_registry import engine_registr
 import backend.engines.dual_engine_registration
 from backend.runtime.runtime_config import runtime_config
 
+_LEGACY_STRATEGY_KEYS = frozenset({"range", "trend", "momentum", "dual_engine"})
+
+
+def normalize_strategy_engine_key(name: str | None) -> str:
+    n = (name or "range_trend").strip().lower()
+    if n in _LEGACY_STRATEGY_KEYS:
+        return "range_trend"
+    if n == "range_trend":
+        return "range_trend"
+    return "range_trend"
+
+
 class StrategyHost:
 
     def create_engine(self,
@@ -13,9 +25,11 @@ class StrategyHost:
 
         context = RuntimeContext(config)
 
-        engine_type = runtime_config.get(
-            "strategy",
-            getattr(config, "engine", "dual_engine")
+        engine_type = normalize_strategy_engine_key(
+            runtime_config.get(
+                "strategy",
+                getattr(config, "engine", "range_trend"),
+            )
         )
         symbol = (
             getattr(config, "symbol", None)
@@ -29,7 +43,7 @@ class StrategyHost:
             market=market,
             execution=execution,
             account=account,
-            symbol=symbol
+            symbol=symbol,
         )
 
         return engine

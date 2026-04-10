@@ -1,4 +1,7 @@
-from fastapi import APIRouter, Request, HTTPException
+from fastapi import APIRouter, Request, HTTPException, Body
+
+from backend.api.routes_system import start_session as system_start_session
+from backend.api.routes_system import stop_session as system_stop_session
 from pydantic import BaseModel
 
 from backend.runtime.runtime_config import runtime_config
@@ -9,6 +12,8 @@ router = APIRouter()
 _ALLOWED_SESSION_MODES = frozenset(
     {"live", "live_shadow", "shadow", "paper", "backtest"}
 )
+
+_UI_SESSION_MODES = frozenset({"live", "shadow", "paper", "backtest"})
 
 
 class CreateSessionRequest(BaseModel):
@@ -25,6 +30,16 @@ def _default_mode_from_runtime() -> str:
     if d not in _ALLOWED_SESSION_MODES:
         return "shadow"
     return d
+
+
+def _session_id_from_control_payload(payload: dict) -> str:
+    mode = payload.get("mode")
+    if mode is None or str(mode).strip() == "":
+        raise HTTPException(status_code=400, detail="mode is required")
+    m = str(mode).strip().lower().replace("-", "_")
+    if m not in _UI_SESSION_MODES:
+        raise HTTPException(status_code=400, detail=f"Invalid mode: {mode!r}")
+    return canonical_session_id(m)
 
 
 def _resolve_payload_mode(payload: CreateSessionRequest) -> str:
@@ -85,3 +100,34 @@ async def list_sessions(req: Request):
         }
 
     return result
+
+
+@router.post("/start")
+async def session_control_start(req: Request, payload: dict = Body(...)):
+    manager = req.app.state.manager
+    sid = _session_id_from_control_payload(payload)
+    if not manager.get(sid):
+        raise HTTPException(status_code=404, detail="Session not found")
+    out = await system_start_session(req, sid)
+    return {**out, "status": "started"}
+
+
+@router.post("/stop")
+async def session_control_stop(req: Request, payload: dict = Body(...)):
+    manager = req.app.state.manager
+    sid = _session_id_from_control_payload(payload)
+    if not manager.get(sid):
+        raise HTTPException(status_code=404, detail="Session not found")
+    out = await system_stop_session(req, sid)
+    return {**out, "status": "stopped"}
+
+
+@router.post("/restart")
+async def session_control_restart(req: Request, payload: dict = Body(...)):
+    manager = req.app.state.manager
+    sid = _session_id_from_control_payload(payload)
+    if not manager.get(sid):
+        raise HTTPException(status_code=404, detail="Session not found")
+    await system_stop_session(req, sid)
+    out = await system_start_session(req, sid)
+    return {**out, "status": "restarted"}

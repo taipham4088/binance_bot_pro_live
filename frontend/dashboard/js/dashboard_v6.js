@@ -19,6 +19,19 @@ let executionHistoryRequestId = 0
 const sessionRuntimeStatus = {
   live: "UNKNOWN",
   shadow: "UNKNOWN",
+  paper: "UNKNOWN",
+  backtest: "UNKNOWN",
+}
+
+function normalizeDashboardTradeMode(v) {
+  const x = String(v || "dual").toLowerCase()
+  if (x === "both") return "dual"
+  if (x === "long" || x === "short" || x === "dual") return x
+  return "dual"
+}
+
+function normalizeDashboardStrategy(_v) {
+  return "range_trend"
 }
 
 function sessionControlStatus(msg, isError = false) {
@@ -59,6 +72,59 @@ async function postSessionControl(path) {
   }
   return res.json().catch(() => ({}))
 }
+
+document.addEventListener("click", async (e) => {
+  const t = e.target
+  const session = t.dataset?.session
+  const action = t.dataset?.action
+  if (!session || !action) return
+
+  const sid = String(session).toLowerCase()
+
+  if (action === "export") {
+    exportCandle(sid)
+    return
+  }
+
+  try {
+    if (action === "start") {
+      await ensureSessionCreated(sid)
+    }
+    const res = await fetch(`/api/session/${action}`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        mode: sid,
+      }),
+    })
+    if (!res.ok) {
+      let detail = ""
+      try {
+        const body = await res.json()
+        detail = body?.detail != null ? `: ${body.detail}` : ""
+      } catch (_err) {
+        detail = ""
+      }
+      sessionControlStatus(
+        `${action.toUpperCase()} ${sid.toUpperCase()} failed — HTTP ${res.status}${detail}`,
+        true
+      )
+      await refreshSessionStatuses()
+      return
+    }
+    sessionControlStatus(`${action.toUpperCase()} ${sid.toUpperCase()} ok`)
+    await refreshSessionStatuses()
+    await refreshAfterLifecycleAction()
+  } catch (err) {
+    sessionControlStatus(
+      `${action.toUpperCase()} ${sid.toUpperCase()} failed — ${err?.message || err}`,
+      true
+    )
+    await refreshSessionStatuses()
+  }
+})
 
 async function ensureSessionCreated(sessionId) {
   try {
@@ -199,8 +265,10 @@ function setSessionStatusEl(id, status) {
   if (!el) return
   const text = normalizeSessionStatus(status)
   el.textContent = text
-  if (id === "session_status_live") sessionRuntimeStatus.live = text
-  if (id === "session_status_shadow") sessionRuntimeStatus.shadow = text
+  const key = id.replace(/^session_status_/, "")
+  if (key && Object.prototype.hasOwnProperty.call(sessionRuntimeStatus, key)) {
+    sessionRuntimeStatus[key] = text
+  }
   el.classList.remove("running", "stopped", "unknown")
   if (text === "RUNNING") el.classList.add("running")
   else if (text === "STOPPED") el.classList.add("stopped")
@@ -235,9 +303,13 @@ async function refreshSessionStatuses() {
     const data = await res.json()
     setSessionStatusEl("session_status_live", readStatusFromSessionsPayload(data, "live"))
     setSessionStatusEl("session_status_shadow", readStatusFromSessionsPayload(data, "shadow"))
+    setSessionStatusEl("session_status_paper", readStatusFromSessionsPayload(data, "paper"))
+    setSessionStatusEl("session_status_backtest", readStatusFromSessionsPayload(data, "backtest"))
   } catch (_e) {
     setSessionStatusEl("session_status_live", "UNKNOWN")
     setSessionStatusEl("session_status_shadow", "UNKNOWN")
+    setSessionStatusEl("session_status_paper", "UNKNOWN")
+    setSessionStatusEl("session_status_backtest", "UNKNOWN")
   }
 }
 
@@ -509,7 +581,7 @@ if(data.config && !controlInitialized){
 if(data.config.trade_mode){
 
 document.getElementById("trade_mode_select").value =
-data.config.trade_mode
+normalizeDashboardTradeMode(data.config.trade_mode)
 
 flashButton(
 document.querySelector("#trade_mode_select")
@@ -523,7 +595,7 @@ document.querySelector("#trade_mode_select")
 if(data.config.strategy){
 
 document.getElementById("strategy_select").value =
-data.config.strategy
+normalizeDashboardStrategy(data.config.strategy)
 
 flashButton(
 document.querySelector("#strategy_select")

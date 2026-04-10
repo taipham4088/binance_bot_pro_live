@@ -6,12 +6,11 @@ from enum import Enum
 router = APIRouter()
 
 class EngineType(str, Enum):
-    dual_engine = "dual_engine"
+    range_trend = "range_trend"
 
 
 class EngineProfile(str, Enum):
     range_trend = "range_trend"
-    momentum = "momentum"
 
 
 class PositionMode(str, Enum):
