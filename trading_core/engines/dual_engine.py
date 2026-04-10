@@ -58,6 +58,14 @@ class DualEngine:
     def __init__(self, config, context, market=None, execution_adapter=None, account=None):
         self.config = config
         self.context = context
+        self.long_enabled = getattr(self.config, "trade_mode", "dual") in ("long", "dual")
+        self.short_enabled = getattr(self.config, "trade_mode", "dual") in ("short", "dual")
+        print("[DUAL ENGINE INIT]")
+        print("trade_mode =", getattr(config, "trade_mode", None))
+        print("[DUAL ENGINE CONFIG]")
+        print("trade_mode =", getattr(config, "trade_mode", None))
+        print("risk =", getattr(config, "risk_per_trade", None))
+        print("balance =", getattr(config, "initial_balance", None))
 
         # 🔌 ports
         self.market = market
@@ -83,6 +91,11 @@ class DualEngine:
     # MAIN BAR HANDLER
     # =========================
     def on_bar(self, i, row, df):
+        self.long_enabled = getattr(self.config, "trade_mode", "dual") in ("long", "dual")
+        self.short_enabled = getattr(self.config, "trade_mode", "dual") in ("short", "dual")
+        print("[ENGINE MODE]")
+        print("long_enabled =", self.long_enabled)
+        print("short_enabled =", self.short_enabled)
 
         time = row["time"]
         day = time.date()
@@ -149,11 +162,16 @@ class DualEngine:
     # =========================
     def _open_position(self, signal):
 
+        entry = signal.get("entry") or signal.get("entry_price")
+
+        if entry is None:
+            return
+
         self.position = Position(signal)
 
         order_intent = {
             "side": signal["side"],
-            "entry": signal["entry"],
+            "entry": entry,
             "sl": signal["sl"],
             "tp": signal["tp"],
             "risk": signal["risk"],

@@ -46,6 +46,16 @@ def create_session(request: Request, mode: str | None = None):
     manager = request.app.state.manager
 
     effective_mode = _resolve_create_mode(mode)
+    sid = canonical_session_id(effective_mode)
+
+    # Idempotent create: preserve existing per-session runtime fields (e.g. csv_path).
+    existing = manager.get(sid)
+    if existing is not None:
+        return {
+            "session_id": existing.id,
+            "status": getattr(existing, "status", "UNKNOWN"),
+            "mode": existing.mode,
+        }
 
     # ✅ default EngineConfig cho app session (aligned with runtime_config)
     cfg = EngineConfig(
@@ -55,8 +65,9 @@ def create_session(request: Request, mode: str | None = None):
         exchange=runtime_config.get("exchange") or "binance",
     )
 
-    sid = canonical_session_id(effective_mode)
     defer = mode_defers_execution_bootstrap(effective_mode)
+    if effective_mode in ("paper", "backtest"):
+        defer = True
 
     session = manager.create_session(
         mode=effective_mode,
@@ -201,7 +212,16 @@ async def stop_session(request: Request, session_id: str):
 @router.get("/sessions")
 def list_sessions(request: Request):
     manager = request.app.state.manager
-    return manager.snapshot()
+    sessions_map = {}
+    for session_id, session in manager.sessions.items():
+        sessions_map[session_id] = {
+            "mode": session.mode,
+            "status": getattr(session, "status", "UNKNOWN"),
+        }
+    return {
+        "active_session": manager.active_session_id,
+        "sessions": sessions_map,
+    }
 
 
 @router.get("/market")

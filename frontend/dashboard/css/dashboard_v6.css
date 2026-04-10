@@ -216,6 +216,23 @@ color:#94a3b8;
 font-weight:700;
 }
 
+.session-live-status .finished{
+color:#eab308;
+font-weight:700;
+}
+
+.session-live-status .error{
+color:#f87171;
+font-weight:700;
+}
+
+.backtest-progress-label{
+font-size:12px;
+color:#94a3b8;
+margin-bottom:8px;
+min-height:18px;
+}
+
 .session-close-btn{
 height:30px;
 padding:4px 10px;

@@ -35,6 +35,13 @@ class SystemStateBus:
 
         return self.state
 
+    def on_status(self, updates: dict):
+        """Merge ad-hoc keys (e.g. backtest progress) into broadcastable state."""
+        if not updates:
+            return self.state
+        self.state.update(updates)
+        return self.state
+
     def snapshot(self):
         return dict(self.state)
 

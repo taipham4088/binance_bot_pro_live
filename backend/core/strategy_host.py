@@ -22,6 +22,13 @@ class StrategyHost:
                       market,
                       execution,
                       account):
+        print("[STRATEGY HOST]")
+        print("trade_mode =", getattr(config, "trade_mode", None))
+        print("[ENGINE CONFIG]")
+        print("trade_mode =", getattr(config, "trade_mode", None))
+        print("risk =", getattr(config, "risk_per_trade", None))
+        print("balance =", getattr(config, "initial_balance", None))
+        print("strategy =", getattr(config, "engine", None))
 
         context = RuntimeContext(config)
 

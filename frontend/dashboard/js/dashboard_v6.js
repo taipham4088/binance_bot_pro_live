@@ -86,6 +86,48 @@ document.addEventListener("click", async (e) => {
     return
   }
 
+  if (action === "import") {
+    const path = prompt("Enter CSV path")
+    if (path === null) return
+    const trimmed = String(path).trim()
+    if (!trimmed) return
+    try {
+      await ensureSessionCreated(sid)
+      const res = await fetch("/api/session/import", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          mode: sid,
+          path: trimmed,
+        }),
+      })
+      if (!res.ok) {
+        let detail = ""
+        try {
+          const body = await res.json()
+          detail = body?.detail != null ? `: ${body.detail}` : ""
+        } catch (_err) {
+          detail = ""
+        }
+        sessionControlStatus(
+          `IMPORT ${sid.toUpperCase()} failed — HTTP ${res.status}${detail}`,
+          true
+        )
+        await refreshSessionStatuses()
+        return
+      }
+      sessionControlStatus(`IMPORT ${sid.toUpperCase()} ok`)
+      await refreshSessionStatuses()
+    } catch (err) {
+      sessionControlStatus(
+        `IMPORT ${sid.toUpperCase()} failed — ${err?.message || err}`,
+        true
+      )
+      await refreshSessionStatuses()
+    }
+    return
+  }
+
   try {
     if (action === "start") {
       await ensureSessionCreated(sid)
@@ -189,6 +231,25 @@ async function sessionAction(sessionId, action, btn) {
 async function exportCandle(session) {
   const sid = String(session || "live").toLowerCase()
   try {
+    if (sid === "backtest") {
+      const res = await fetch("/api/session/export", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ mode: sid }),
+      })
+      const data = await res.json().catch(() => ({}))
+      if (!res.ok) {
+        const msg = data?.detail || data?.error || `HTTP ${res.status}`
+        sessionControlStatus(`Backtest export failed: ${msg}`, true)
+        alert("Backtest export failed: " + msg)
+        return
+      }
+      const fp = data.file || data.path || ""
+      sessionControlStatus(`Backtest exported successfully → ${fp}`, false)
+      alert(`Backtest exported successfully\nFile: ${fp}`)
+      return
+    }
+
     const res = await fetch(
       `/api/debug/export-candle?session=${encodeURIComponent(sid)}`
     )
@@ -256,6 +317,8 @@ async function refreshAfterLifecycleAction() {
 function normalizeSessionStatus(value) {
   const s = String(value || "").trim().toUpperCase()
   if (s === "RUNNING") return "RUNNING"
+  if (s === "FINISHED") return "FINISHED"
+  if (s === "ERROR") return "ERROR"
   if (s === "STOPPED" || s === "IDLE" || s === "CREATED") return "STOPPED"
   return "UNKNOWN"
 }
@@ -269,9 +332,11 @@ function setSessionStatusEl(id, status) {
   if (key && Object.prototype.hasOwnProperty.call(sessionRuntimeStatus, key)) {
     sessionRuntimeStatus[key] = text
   }
-  el.classList.remove("running", "stopped", "unknown")
+  el.classList.remove("running", "stopped", "unknown", "finished", "error")
   if (text === "RUNNING") el.classList.add("running")
   else if (text === "STOPPED") el.classList.add("stopped")
+  else if (text === "FINISHED") el.classList.add("finished")
+  else if (text === "ERROR") el.classList.add("error")
   else el.classList.add("unknown")
 }
 
@@ -403,6 +468,7 @@ const CONTROL_APPLY_IDS = [
   "symbol_select",
   "exchange_select",
   "risk_input",
+  "initial_balance",
   "trade_mode_select",
   "trading_mode_select",
   "strategy_select",
@@ -477,6 +543,38 @@ document.addEventListener("DOMContentLoaded", function(){
       }
     })
   }
+
+  document.getElementById("apply_initial_balance")?.addEventListener("click", async () => {
+    const el = document.getElementById("initial_balance")
+    const btn = document.getElementById("apply_initial_balance")
+    const value = el?.value
+    try {
+      const res = await fetch("/api/session/config", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          initial_balance: Number(value),
+        }),
+      })
+      if (!res.ok) {
+        let detail = ""
+        try {
+          const body = await res.json()
+          detail = body?.detail != null ? `: ${body.detail}` : ""
+        } catch (_err) {
+          detail = ""
+        }
+        console.error("initial_balance apply failed", res.status, detail)
+        return
+      }
+      markControlApplyCommitted("initial_balance", String(Number(value)))
+      if (btn) flashButton(btn)
+    } catch (e) {
+      console.error(e)
+    }
+  })
 })
 
 function restoreLayout(){
@@ -957,6 +1055,8 @@ document.getElementById("mh-funding").innerText =
 
 }
 
+updateBacktestProgressDisplay(data)
+
 }
 }
 
@@ -1010,6 +1110,34 @@ return "No Active Session"
 return pnlFmtStr(panel?.mode, "—")
 }
 
+function updateBacktestProgressDisplay(root) {
+  const el = document.getElementById("backtest_progress")
+  if (!el) return
+  const pnl = root?.pnl || {}
+  const prog =
+    root?.backtest_progress !== undefined ? root.backtest_progress : pnl.backtest_progress
+  const tc =
+    root?.trade_count !== undefined ? root.trade_count : pnl.trade_count
+  const eq = pnl.equity !== undefined && pnl.equity !== null ? pnl.equity : root?.equity
+
+  if (prog !== undefined && prog !== null && Number(prog) < 1) {
+    const pct = Math.round(Number(prog) * 100)
+    let s = `Backtest Running ${pct}%`
+    if (tc != null && tc !== "") s += ` · Trades: ${tc}`
+    if (eq != null && eq !== "" && !Number.isNaN(Number(eq))) s += ` · Equity: ${pnlFmtNum(eq)}`
+    el.innerText = s
+    return
+  }
+  if (prog !== undefined && prog !== null && Number(prog) >= 1) {
+    let s = "Backtest Finished"
+    if (tc != null && tc !== "") s += ` · Trades: ${tc}`
+    if (eq != null && eq !== "" && !Number.isNaN(Number(eq))) s += ` · Final Equity: ${pnlFmtNum(eq)}`
+    el.innerText = s
+    return
+  }
+  el.innerText = "Backtest Idle"
+}
+
 function pnlRenderOnePanel(panel, root){
 const modeLine = pnlModeLine(panel, root)
 const sym = pnlFmtStr(panel?.symbol, "—")
@@ -1033,7 +1161,10 @@ Total Equity: ${total}<br>
 function updatePnL(data){
 
 const pnl = data?.pnl
-if(!pnl) return
+if(!pnl) {
+updateBacktestProgressDisplay({ pnl: {} })
+return
+}
 
 const realized = Number(pnl.realized_pnl ?? 0).toFixed(2)
 const drawdown =
@@ -1077,6 +1208,8 @@ equityHistory.shift()
 }
 
 updateEquityChart()
+
+updateBacktestProgressDisplay({ pnl })
 }
 
 function updateMetrics(data){

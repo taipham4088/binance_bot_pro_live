@@ -18,6 +18,9 @@ class LiveRunner(threading.Thread):
     def run(self):
         self.running = True
         self.session.status = "RUNNING"
+        print("[LIVE RUNNER START]")
+        print("trade_mode =", getattr(self.session.config, "trade_mode", None))
+        print("risk =", getattr(self.session.config, "risk_per_trade", None))
         
         engine = self.session.strategy_engine
         bus = self.session.state_bus

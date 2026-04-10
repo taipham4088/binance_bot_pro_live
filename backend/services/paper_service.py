@@ -20,7 +20,15 @@ class PaperService:
         # ===== init ports =====
         market = PaperMarketAdapter(df, speed=speed)
         execution = PaperExecutionAdapter()
-        account = PaperAccountAdapter(session.config.initial_balance)
+        if isinstance(session.config, dict):
+            raw_ib = session.config.get("initial_balance", 10000)
+        else:
+            raw_ib = getattr(session.config, "initial_balance", 10000)
+        try:
+            ib = float(raw_ib)
+        except (TypeError, ValueError):
+            ib = 10000.0
+        account = PaperAccountAdapter(ib)
 
         session.market = market
         session.execution = execution

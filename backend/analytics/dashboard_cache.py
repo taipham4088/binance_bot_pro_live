@@ -534,6 +534,27 @@ class DashboardCache:
                 if isinstance(t, dict) and self._mode_matches_session(t.get("mode"), target)
             ]
 
+        if session is not None and getattr(session, "mode", None) == "backtest":
+            try:
+                snap = session.state_bus.snapshot()
+                if isinstance(snap, dict):
+                    if snap.get("backtest_progress") is not None:
+                        pnl["backtest_progress"] = snap["backtest_progress"]
+                    if snap.get("trade_count") is not None:
+                        pnl["trade_count"] = snap["trade_count"]
+                acc = getattr(session, "account", None)
+                if acc is not None:
+                    eq = float(acc.get_equity())
+                    pnl["equity"] = eq
+                    fl = float(pnl.get("floating_pnl") or 0)
+                    pnl["total_equity"] = eq + fl
+                    if pnl.get("panels") and len(pnl["panels"]) == 1:
+                        p0 = pnl["panels"][0]
+                        p0["equity"] = eq
+                        p0["total_equity"] = pnl["total_equity"]
+            except Exception:
+                pass
+
         return out
 
     # -------------------------
@@ -624,25 +645,39 @@ class DashboardCache:
                     "account_equity": None,
                 }
                 try:
-                    eng = getattr(session, "engine", None)
-                    if eng is not None and getattr(eng, "sync_engine", None):
-                        acct = eng.sync_engine.account
-                        wallet = float(session.get_dynamic_equity())
-                        panel["exchange_wallet_quote"] = wallet
-                        panel["exchange_wallet_usdt"] = float(acct.get_equity("USDT"))
-                        panel["equity"] = wallet
-                        panel["total_equity"] = wallet + fl
-                        btc_px = self._get_price("BTCUSDT")
-                        eth_px = self._get_price("ETHUSDT")
-                        panel["account_equity"] = acct.total_account_equity_usdt(
-                            btc_usdt=btc_px,
-                            eth_usdt=eth_px,
-                        )
+                    if getattr(session, "mode", None) == "backtest":
+                        acc = getattr(session, "account", None)
+                        if acc is not None:
+                            eq = float(acc.get_equity())
+                            panel["equity"] = eq
+                            panel["total_equity"] = eq + fl
+                            panel["exchange_wallet_quote"] = eq
+                        snap = getattr(session.state_bus, "snapshot", lambda: {})()
+                        if isinstance(snap, dict):
+                            if snap.get("backtest_progress") is not None:
+                                panel["backtest_progress"] = snap["backtest_progress"]
+                            if snap.get("trade_count") is not None:
+                                panel["trade_count"] = snap["trade_count"]
                     else:
-                        w = float(session.get_dynamic_equity())
-                        panel["equity"] = w
-                        panel["total_equity"] = w + fl
-                        panel["exchange_wallet_quote"] = w
+                        eng = getattr(session, "engine", None)
+                        if eng is not None and getattr(eng, "sync_engine", None):
+                            acct = eng.sync_engine.account
+                            wallet = float(session.get_dynamic_equity())
+                            panel["exchange_wallet_quote"] = wallet
+                            panel["exchange_wallet_usdt"] = float(acct.get_equity("USDT"))
+                            panel["equity"] = wallet
+                            panel["total_equity"] = wallet + fl
+                            btc_px = self._get_price("BTCUSDT")
+                            eth_px = self._get_price("ETHUSDT")
+                            panel["account_equity"] = acct.total_account_equity_usdt(
+                                btc_usdt=btc_px,
+                                eth_usdt=eth_px,
+                            )
+                        else:
+                            w = float(session.get_dynamic_equity())
+                            panel["equity"] = w
+                            panel["total_equity"] = w + fl
+                            panel["exchange_wallet_quote"] = w
                 except Exception:
                     pass
                 panels.append(panel)
@@ -663,6 +698,10 @@ class DashboardCache:
                 pnl["exchange_wallet_quote"] = p0["exchange_wallet_quote"]
                 pnl["exchange_wallet_usdt"] = p0["exchange_wallet_usdt"]
                 pnl["account_equity"] = p0["account_equity"]
+                if p0.get("backtest_progress") is not None:
+                    pnl["backtest_progress"] = p0["backtest_progress"]
+                if p0.get("trade_count") is not None:
+                    pnl["trade_count"] = p0["trade_count"]
             else:
                 pnl["mode"] = "MULTI"
                 pnl["symbol"] = None

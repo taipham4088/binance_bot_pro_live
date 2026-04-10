@@ -127,6 +127,39 @@ async def dashboard_v7():
         "frontend/dashboard/templates/dashboard_v7.html"
     )
 
+def _backtest_engine_trades_to_history(trades: list) -> list:
+    """Map DualEngine in-memory trades to dashboard history rows."""
+    history = []
+    for t in reversed(trades[-80:]):
+        et = t.get("exit_time")
+        if hasattr(et, "timestamp"):
+            ts = int(et.timestamp())
+        elif et is not None:
+            try:
+                ts = int(et)
+            except (TypeError, ValueError):
+                ts = 0
+        else:
+            ts = 0
+        entry = t.get("entry") or t.get("entry_price")
+        history.append(
+            {
+                "time": ts,
+                "mode": "backtest",
+                "symbol": "BTCUSDT",
+                "strategy": "range_trend",
+                "side": str(t.get("side") or "-").upper(),
+                "size": t.get("size") if t.get("size") is not None else 1,
+                "entry": entry,
+                "exit": t.get("exit_price"),
+                "pnl": t.get("result"),
+                "fees": 0,
+                "asset": "USDT",
+            }
+        )
+    return history
+
+
 @router.get("/api/trades/history")
 async def get_trade_history(
     request: Request,
@@ -143,52 +176,60 @@ async def get_trade_history(
     if not key:
         return {"status": "ok", "history": []}
 
-    db_path = mode_storage.get_trade_path(key)
-    if not db_path or not os.path.exists(db_path):
-        return {"status": "ok", "history": []}
-
-    conn = sqlite3.connect(db_path)
-    cursor = conn.cursor()
-
-    cursor.execute("""
-        SELECT 
-        entry_time,
-        mode,
-        symbol,
-        strategy,
-        side,
-        entry_size,
-        entry_price,
-        exit_price,
-        pnl,
-        fees
-        FROM trades
-        ORDER BY trade_id DESC
-        LIMIT 50
-    """)
-
-    rows = cursor.fetchall()
-
-    conn.close()
-
     history = []
 
-    for r in rows:
+    db_path = mode_storage.get_trade_path(key)
+    if db_path and os.path.exists(db_path):
+        conn = sqlite3.connect(db_path)
+        cursor = conn.cursor()
 
-        history.append({
+        cursor.execute("""
+            SELECT 
+            entry_time,
+            mode,
+            symbol,
+            strategy,
+            side,
+            entry_size,
+            entry_price,
+            exit_price,
+            pnl,
+            fees
+            FROM trades
+            ORDER BY trade_id DESC
+            LIMIT 50
+        """)
 
-            "time": r[0],
-            "mode": r[1],
-            "symbol": r[2],
-            "strategy": r[3],
-            "side": r[4],
-            "size": r[5],
-            "entry": r[6],
-            "exit": r[7],
-            "pnl": r[8],
-            "fees": r[9]
+        rows = cursor.fetchall()
 
-        })
+        conn.close()
+
+        for r in rows:
+            history.append(
+                {
+                    "time": r[0],
+                    "mode": r[1],
+                    "symbol": r[2],
+                    "strategy": r[3],
+                    "side": r[4],
+                    "size": r[5],
+                    "entry": r[6],
+                    "exit": r[7],
+                    "pnl": r[8],
+                    "fees": r[9],
+                }
+            )
+
+    if key == "backtest":
+        try:
+            mgr = request.app.state.manager
+            sess = mgr.get("backtest")
+            eng = getattr(sess, "engine", None) if sess else None
+            trades = list(getattr(eng, "trades", []) or [])
+            if trades:
+                history = _backtest_engine_trades_to_history(trades)
+        except Exception:
+            pass
 
     return {
         "status": "ok",
