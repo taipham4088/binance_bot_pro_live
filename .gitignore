@@ -22,3 +22,25 @@ data/session_meta/
 # OS
 .DS_Store
 Thumbs.db
+
+# Backtest outputs
+*.csv
+
+# Debug export
+data/debug/*
+!data/debug/.gitkeep
+
+# SQLite DB runtime
+*.db
+*.sqlite
+
+# Session runtime
+data/live/
+data/shadow/
+data/live_shadow/
+
+# VSCode
+.vscode/
+
+# PyCharm
+.idea/
