@@ -28,6 +28,160 @@ let lastMetricsSummary = null
 
 const v8AppStartMs = Date.now()
 
+const V8_PANEL_STORAGE_KEY = "dashboard_v8_panels"
+
+const V8_USER_PANEL_IDS = [
+  "v8-panel-metrics",
+  "v8-panel-performance",
+  "v8-panel-system",
+  "v8-panel-alerts",
+  "v8-exec-history-ui",
+]
+
+function v8Dash(v) {
+  if (v === null || v === undefined || v === "") return "—"
+  if (typeof v === "number" && Number.isNaN(v)) return "—"
+  return String(v)
+}
+
+/** Unix seconds (API trade / execution rows) → DD-MM-YYYY HH:mm */
+function formatTradeTime(ts) {
+  if (ts == null || ts === "") return "—"
+  const sec = Number(ts)
+  if (!Number.isFinite(sec)) return "—"
+  const d = new Date(sec * 1000)
+  if (Number.isNaN(d.getTime())) return "—"
+  const day = String(d.getDate()).padStart(2, "0")
+  const month = String(d.getMonth() + 1).padStart(2, "0")
+  const year = d.getFullYear()
+  const hour = String(d.getHours()).padStart(2, "0")
+  const minute = String(d.getMinutes()).padStart(2, "0")
+  return `${day}-${month}-${year} ${hour}:${minute}`
+}
+
+function getV8PanelHiddenSet() {
+  try {
+    const o = JSON.parse(localStorage.getItem(V8_PANEL_STORAGE_KEY) || "{}")
+    const arr = Array.isArray(o.hidden) ? o.hidden : []
+    return new Set(arr.filter((x) => typeof x === "string"))
+  } catch (_e) {
+    return new Set()
+  }
+}
+
+function saveV8PanelHiddenSet(set) {
+  localStorage.setItem(
+    V8_PANEL_STORAGE_KEY,
+    JSON.stringify({ hidden: [...set] })
+  )
+}
+
+function applyV8PanelUserPrefs() {
+  const hidden = getV8PanelHiddenSet()
+  V8_USER_PANEL_IDS.forEach((id) => {
+    if (id === "v8-exec-history-ui") return
+    const el = document.getElementById(id)
+    if (!el) return
+    el.classList.toggle("hidden-panel", hidden.has(id))
+  })
+  const execHidden = hidden.has("v8-exec-history-ui")
+  const execTabWrap = document.getElementById("v8-exec-history-ui")
+  const execPane = document.getElementById("v8_pane_exec")
+  if (execTabWrap) execTabWrap.classList.toggle("hidden-panel", execHidden)
+  if (execPane) execPane.classList.toggle("hidden-panel", execHidden)
+  if (execHidden) setV8HistoryTab("trades")
+}
+
+function syncV8PanelMenuCheckboxes() {
+  const hidden = getV8PanelHiddenSet()
+  document.querySelectorAll("#v8_panels_menu input[data-v8-panel-id]").forEach((inp) => {
+    const id = inp.getAttribute("data-v8-panel-id")
+    if (!id) return
+    inp.checked = !hidden.has(id)
+  })
+}
+
+function initV8PanelsDropdown() {
+  const btn = document.getElementById("v8_panels_btn")
+  const menu = document.getElementById("v8_panels_menu")
+  const drop = document.getElementById("v8_panels_dropdown")
+  if (!btn || !menu || !drop) return
+
+  btn.addEventListener("click", (e) => {
+    e.stopPropagation()
+    const open = menu.hidden
+    menu.hidden = !open
+    btn.setAttribute("aria-expanded", open ? "true" : "false")
+    if (open) syncV8PanelMenuCheckboxes()
+  })
+
+  menu.querySelectorAll("input[data-v8-panel-id]").forEach((inp) => {
+    inp.addEventListener("change", () => {
+      const id = inp.getAttribute("data-v8-panel-id")
+      if (!id) return
+      const hidden = getV8PanelHiddenSet()
+      if (inp.checked) hidden.delete(id)
+      else hidden.add(id)
+      saveV8PanelHiddenSet(hidden)
+      applyV8PanelUserPrefs()
+    })
+  })
+
+  document.addEventListener("click", () => {
+    if (!menu.hidden) {
+      menu.hidden = true
+      btn.setAttribute("aria-expanded", "false")
+    }
+  })
+  drop.addEventListener("click", (e) => e.stopPropagation())
+}
+
+function setV8HistoryTab(which) {
+  const tabT = document.getElementById("v8_tab_trades")
+  const tabE = document.getElementById("v8_tab_exec")
+  const paneT = document.getElementById("v8_pane_trades")
+  const paneE = document.getElementById("v8_pane_exec")
+  if (!tabT || !paneT) return
+
+  let w = which === "exec" ? "exec" : "trades"
+  if (w === "exec") {
+    if (
+      document.getElementById("v8-exec-history-ui")?.classList.contains("hidden-panel") ||
+      document.getElementById("v8_pane_exec")?.classList.contains("hidden-panel")
+    ) {
+      w = "trades"
+    }
+  }
+
+  const trades = w === "trades"
+  tabT.classList.toggle("v8-tab-active", trades)
+  tabT.setAttribute("aria-selected", trades ? "true" : "false")
+  if (tabE) {
+    tabE.classList.toggle("v8-tab-active", !trades)
+    tabE.setAttribute("aria-selected", trades ? "false" : "true")
+  }
+  paneT.hidden = !trades
+  if (paneE) {
+    paneE.hidden = trades
+  }
+}
+
+function initV8HistoryTabs() {
+  document.getElementById("v8_tab_trades")?.addEventListener("click", () => setV8HistoryTab("trades"))
+  document.getElementById("v8_tab_exec")?.addEventListener("click", () => setV8HistoryTab("exec"))
+}
+
+function resetV8DashboardLayout() {
+  localStorage.removeItem(V8_PANEL_STORAGE_KEY)
+  V8_USER_PANEL_IDS.forEach((id) => {
+    document.getElementById(id)?.classList.remove("hidden-panel")
+  })
+  document.getElementById("v8_pane_exec")?.classList.remove("hidden-panel")
+  applyV8PanelUserPrefs()
+  syncV8PanelMenuCheckboxes()
+  setV8HistoryTab("trades")
+}
+
 function applyDashboardModeVisibility() {
   const m = (selectedDashboardSession || "live").toLowerCase()
   document.body.dataset.v8Session = m
@@ -42,6 +196,7 @@ function applyDashboardModeVisibility() {
     el.hidden = !show
     el.setAttribute("aria-hidden", show ? "false" : "true")
   })
+  applyV8PanelUserPrefs()
 }
 
 function updateHeaderRunning() {
@@ -725,6 +880,8 @@ function applySymbolSelectFromBaseline() {
 document.addEventListener("DOMContentLoaded", function(){
 
   applyDashboardModeVisibility()
+  initV8PanelsDropdown()
+  initV8HistoryTabs()
 
   // Symbol list must exist before hydrating from /api/dashboard (avoids race → false “pending”).
   ;(async function bootstrapDashboardControlPanel() {
@@ -1318,9 +1475,6 @@ async function updateTrades() {
   const table = document.querySelector("#trades tbody")
   if (!table) return
 
-  const root = document.getElementById("trades")
-  const compact = root?.classList?.contains("v8-compact-history")
-
   try {
     const requestId = ++tradesRequestId
 
@@ -1333,47 +1487,45 @@ async function updateTrades() {
     if (!data.history) return
 
     data.history.forEach((t) => {
-      const time = new Date(t.time * 1000)
-      const timeStr = compact
-        ? time.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
-        : time.toLocaleString()
+      const timeStr = formatTradeTime(t.time)
 
-      const side = t.side ?? "-"
-      const size = t.size ?? "-"
-      const entry = t.entry ?? "-"
-      const exit = t.exit ?? "-"
-      const pnl = t.pnl ?? 0
-      const fees = Number(t.fees ?? t.fee ?? 0).toFixed(3)
+      const side = v8Dash(t.side)
+      const size = v8Dash(t.size)
+      const entry = v8Dash(t.entry)
+      const exit = v8Dash(t.exit)
+      const pnlRaw = t.pnl
+      const pnlStr = v8Dash(pnlRaw)
+      const feeRaw = t.fees ?? t.fee
+      const feeStr =
+        feeRaw !== null && feeRaw !== undefined && feeRaw !== ""
+          ? Number(feeRaw).toFixed(4)
+          : "—"
+      const strat = v8Dash(t.strategy)
+      const sess = v8Dash(t.mode)
 
-      const sideColor = side === "LONG" ? "#22c55e" : "#ef4444"
-      const pnlColor = pnl >= 0 ? "#22c55e" : "#ef4444"
+      const su = String(t.side || "").toUpperCase()
+      const sideColor =
+        su === "LONG" ? "#22c55e" : su === "SHORT" ? "#ef4444" : "#94a3b8"
+      const pnlNum = Number(pnlRaw)
+      const pnlColor =
+        pnlRaw !== null && pnlRaw !== undefined && !Number.isNaN(pnlNum)
+          ? pnlNum >= 0
+            ? "#22c55e"
+            : "#ef4444"
+          : "var(--v8-muted, #94a3b8)"
 
       const row = document.createElement("tr")
-
-      if (compact) {
-        const px = t.exit ?? t.entry ?? "-"
-        row.innerHTML = `
+      row.innerHTML = `
 <td class="mono">${timeStr}</td>
-<td style="color:${sideColor}">${side}</td>
-<td class="mono">${px}</td>
-<td style="color:${pnlColor}" class="mono">${pnl}</td>
+<td style="color:${sideColor}" class="mono">${side}</td>
+<td class="mono">${size}</td>
+<td class="mono">${entry}</td>
+<td class="mono">${exit}</td>
+<td style="color:${pnlColor}" class="mono">${pnlStr}</td>
+<td class="mono">${feeStr}</td>
+<td class="mono v8-cell-dim">${strat}</td>
+<td class="mono v8-cell-dim">${sess}</td>
 `
-      } else {
-        row.innerHTML = `
-<td>${timeStr}</td>
-<td>${t.mode ?? "-"}</td>
-<td>${t.symbol ?? "-"}</td>
-<td>${t.strategy ?? "-"}</td>
-<td style="color:${sideColor}">${side}</td>
-<td>${size}</td>
-<td>${entry}</td>
-<td>${exit}</td>
-<td style="color:${pnlColor}">${pnl}</td>
-<td>${fees}</td>
-<td>${t.asset || "USDT"}</td>
-`
-      }
-
       table.appendChild(row)
     })
   } catch (e) {
@@ -1888,10 +2040,19 @@ console.log(e)
 
 }
 
+const V8_PIPELINE_STAGE_LABELS = {
+  signal: "Signal",
+  decision: "Decision",
+  order: "Order",
+  exchange: "Exchange",
+  fill: "Fill",
+}
+
 function renderExecutionPipeline() {
   const container = document.getElementById("execution_pipeline")
   if (!container) return
   container.innerHTML = `
+<div class="execution-pipeline">
 <div class="v8-pipeline-track">
 <div id="p_signal" class="pipeline-step" data-step="signal">Signal</div>
 <div class="pipeline-arrow">→</div>
@@ -1902,6 +2063,7 @@ function renderExecutionPipeline() {
 <div id="p_exchange" class="pipeline-step" data-step="exchange">Exchange</div>
 <div class="pipeline-arrow">→</div>
 <div id="p_fill" class="pipeline-step" data-step="fill">Fill</div>
+</div>
 </div>
 `
 }
@@ -1917,7 +2079,7 @@ function updateExecutionPipeline(data) {
       if (!el) return
       el.classList.remove("active", "done")
     })
-    if (meta) meta.textContent = "Session not running — pipeline idle"
+    if (meta) meta.textContent = "Current Step: — · Latency: — (session not running)"
     return
   }
 
@@ -1952,8 +2114,9 @@ function updateExecutionPipeline(data) {
 
   const exec = data?.observability?.execution_monitor
   const lat = exec?.total_latency_ms
+  const stageLabel = V8_PIPELINE_STAGE_LABELS[stage] || stage
   if (meta) {
-    meta.textContent = `Current step: ${stage} · Latency: ${
+    meta.textContent = `Current Step: ${stageLabel} · Latency: ${
       lat != null && !Number.isNaN(Number(lat)) ? Math.round(Number(lat)) + " ms" : "—"
     }`
   }
@@ -1965,65 +2128,75 @@ function updateV8PipelineBreadcrumb(_data) {
   el.textContent = "Signal → Decision → Order → Exchange → Fill"
 }
 
-async function updateExecutionHistory(){
+async function updateExecutionHistory() {
+  const table = document.querySelector("#execution_history_v8 tbody")
+  if (!table) return
 
-try{
-const requestId = ++executionHistoryRequestId
+  const placeholder = (msg) => {
+    table.innerHTML = `<tr><td colspan="6" class="v8-table-placeholder">${msg}</td></tr>`
+  }
 
-const res = await fetch(`/api/execution/history?${getExecutionHistoryQueryParams()}`)
+  try {
+    const requestId = ++executionHistoryRequestId
 
-if(!res.ok) return
+    const res = await fetch(`/api/execution/history?${getExecutionHistoryQueryParams()}`)
 
-const data = await res.json()
-if(requestId !== executionHistoryRequestId) return
+    if (!res.ok) {
+      placeholder("No execution history available")
+      return
+    }
 
-const table = document.querySelector("#execution_history_table tbody")
+    const data = await res.json()
+    if (requestId !== executionHistoryRequestId) return
 
-if(!table) return
+    table.innerHTML = ""
 
-table.innerHTML=""
+    if (!data.history || !data.history.length) {
+      placeholder("No execution history available")
+      return
+    }
 
-if(!data.history) return
+    const rows = data.history.slice(0, 50)
+    rows.forEach((t) => {
+      const time = formatTradeTime(t.time)
 
-const rows = data.history.slice(0,50)
-rows.forEach(t => {
+      const step =
+        t.strategy != null && String(t.strategy).trim() !== ""
+          ? v8Dash(t.strategy)
+          : v8Dash(t.mode)
+      const actSide = v8Dash(t.side)
+      const actSym = v8Dash(t.symbol)
+      const action =
+        actSide === "—" && actSym === "—" ? "—" : `${actSide} · ${actSym}`
+      const price = v8Dash(t.fill_price)
+      const latRaw = t.latency
+      const latency =
+        latRaw !== null && latRaw !== undefined && latRaw !== ""
+          ? `${Number(latRaw).toFixed(2)} ms`
+          : "—"
 
-const time = new Date(t.time * 1000).toLocaleString()
+      let status = "OK"
+      const slip = t.slippage
+      if (slip !== null && slip !== undefined && slip !== "") {
+        const sn = Number(slip)
+        if (!Number.isNaN(sn) && Math.abs(sn) > 0.001) status = "CHECK"
+      }
 
-const row = document.createElement("tr")
-
-const sideColor =
-t.side === "LONG"
-? "#22c55e"
-: t.side === "SHORT"
-? "#ef4444"
-: "#e2e8f0"
-
-row.innerHTML=`
-
-<td>${time}</td>
-<td>${t.mode ?? "-"}</td>
-<td>${t.symbol ?? "-"}</td>
-<td>${t.strategy ?? "-"}</td>
-<td style="color:${sideColor}">${t.side}</td>
-<td>${t.size ?? "-"}</td>
-<td>${t.fill_price ?? "-"}</td>
-<td>${t.fee != null && t.fee !== "" ? t.fee : "-"}</td>
-<td>${t.slippage ?? "-"}</td>
-<td>${t.latency ?? "-"} ms</td>
-
+      const row = document.createElement("tr")
+      row.innerHTML = `
+<td class="mono">${time}</td>
+<td class="mono v8-cell-dim">${step}</td>
+<td class="mono">${action || "—"}</td>
+<td class="mono">${price}</td>
+<td class="mono">${latency}</td>
+<td class="mono">${status}</td>
 `
-
-table.appendChild(row)
-
-})
-
-}catch(e){
-
-console.log("execution history error",e)
-
-}
-
+      table.appendChild(row)
+    })
+  } catch (e) {
+    console.log("execution history error", e)
+    placeholder("No execution history available")
+  }
 }
 
 function updateOrderLifecycle(data){

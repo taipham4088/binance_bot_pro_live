@@ -4,9 +4,9 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>BOT PRO LIVE — Trading Desk V8</title>
-<link rel="stylesheet" href="/dashboard/css/dashboard_v8.css?v=1">
+<link rel="stylesheet" href="/dashboard/css/dashboard_v8.css?v=3">
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-<script src="/dashboard/js/dashboard_v8.js?v=1" defer></script>
+<script src="/dashboard/js/dashboard_v8.js?v=3" defer></script>
 </head>
 <body class="v8-body">
 
@@ -27,6 +27,20 @@
           LIVE | SHADOW
         </label>
         <button type="button" class="v8-btn v8-btn-ghost" onclick="openSessionControl()">Sessions</button>
+      </div>
+      <div class="v8-header-util">
+        <div class="v8-dropdown" id="v8_panels_dropdown">
+          <button type="button" class="v8-btn v8-btn-ghost" id="v8_panels_btn" aria-expanded="false" aria-haspopup="true">Panels ▾</button>
+          <div class="v8-panels-menu" id="v8_panels_menu" role="menu" hidden>
+            <div class="v8-panels-menu-title">Show panel</div>
+            <label class="v8-panel-toggle-row"><input type="checkbox" data-v8-panel-id="v8-panel-metrics" checked> Metrics</label>
+            <label class="v8-panel-toggle-row"><input type="checkbox" data-v8-panel-id="v8-panel-performance" checked> Performance</label>
+            <label class="v8-panel-toggle-row"><input type="checkbox" data-v8-panel-id="v8-panel-system" checked> System</label>
+            <label class="v8-panel-toggle-row"><input type="checkbox" data-v8-panel-id="v8-panel-alerts" checked> Alerts</label>
+            <label class="v8-panel-toggle-row"><input type="checkbox" data-v8-panel-id="v8-exec-history-ui" checked> Execution History</label>
+          </div>
+        </div>
+        <button type="button" class="v8-btn v8-btn-ghost" id="v8_reset_layout_btn" onclick="resetV8DashboardLayout()">Reset Layout</button>
       </div>
     </div>
   </div>
@@ -186,39 +200,37 @@
     <p id="v8_pipeline_meta" class="v8-pipeline-meta mono">—</p>
   </section>
 
-  <!-- Observability + right rail -->
-  <section class="v8-row v8-row-obs" aria-label="Observability">
-    <div class="v8-obs-grid">
-      <article class="v8-card" id="v8-panel-reconciliation" data-v8-modes="live,shadow">
-        <div class="v8-card-head"><h2>RECONCILIATION</h2></div>
-        <div id="reconciliation" class="v8-card-body"></div>
-      </article>
-      <article class="v8-card" id="v8-panel-slippage" data-v8-modes="live,shadow">
-        <div class="v8-card-head"><h2>SLIPPAGE</h2></div>
-        <div id="slippage" class="v8-card-body"></div>
-      </article>
-      <article class="v8-card" id="v8-panel-latency" data-v8-modes="live">
-        <div class="v8-card-head"><h2>LATENCY</h2></div>
-        <div id="latency" class="v8-card-body"></div>
-      </article>
+  <!-- Observability: Row A (recon / slip / latency + alerts) · Row B (equity + metrics + performance + system) -->
+  <section class="v8-row v8-row-obs v8-obs-stack" aria-label="Observability">
+    <div class="v8-obs-row-a">
+      <div class="v8-obs-grid">
+        <article class="v8-card" id="v8-panel-reconciliation" data-v8-modes="live,shadow">
+          <div class="v8-card-head"><h2>RECONCILIATION</h2></div>
+          <div id="reconciliation" class="v8-card-body"></div>
+        </article>
+        <article class="v8-card" id="v8-panel-slippage" data-v8-modes="live,shadow">
+          <div class="v8-card-head"><h2>SLIPPAGE</h2></div>
+          <div id="slippage" class="v8-card-body"></div>
+        </article>
+        <article class="v8-card" id="v8-panel-latency" data-v8-modes="live">
+          <div class="v8-card-head"><h2>LATENCY</h2></div>
+          <div id="latency" class="v8-card-body"></div>
+        </article>
+      </div>
+      <aside class="v8-obs-alerts-rail">
+        <article class="v8-card v8-card-alerts-compact" id="v8-panel-alerts" data-v8-modes="live,shadow">
+          <div class="v8-card-head"><h2>ALERTS</h2></div>
+          <div id="alerts" class="v8-card-body v8-alerts-body"></div>
+        </article>
+      </aside>
     </div>
-    <aside class="v8-rail">
-      <article class="v8-card v8-rail-card" id="v8-panel-alerts" data-v8-modes="live,shadow">
-        <div class="v8-card-head"><h2>ALERTS</h2></div>
-        <div id="alerts" class="v8-card-body v8-alerts-body"></div>
-      </article>
-      <article class="v8-card v8-rail-card v8-equity-card" id="v8-panel-equity" data-v8-modes="live,shadow,backtest">
+    <div class="v8-obs-row-b">
+      <article class="v8-card v8-equity-card" id="v8-panel-equity" data-v8-modes="live,shadow,backtest">
         <div class="v8-card-head"><h2>EQUITY CURVE</h2></div>
         <div class="v8-chart-wrap">
           <canvas id="equityChart" height="120"></canvas>
         </div>
       </article>
-    </aside>
-  </section>
-
-  <!-- Metrics + trade history -->
-  <section class="v8-row v8-row-bottom" aria-label="Performance">
-    <div class="v8-bottom-grid">
       <article class="v8-card" id="v8-panel-metrics" data-v8-modes="live,shadow">
         <div class="v8-card-head"><h2>METRICS</h2></div>
         <div id="metrics" class="v8-card-body"></div>
@@ -232,20 +244,55 @@
         <div id="system" class="v8-card-body"></div>
       </article>
     </div>
+  </section>
+
+  <section class="v8-row v8-row-history" aria-label="History">
     <article class="v8-card v8-trades-card" id="v8-panel-trades" data-v8-modes="live,shadow,paper,backtest">
-      <div class="v8-card-head"><h2>TRADE HISTORY</h2></div>
-      <div class="table-scroll">
-        <table id="trades" class="v8-table v8-compact-history">
-          <thead>
-            <tr>
-              <th>TIME</th>
-              <th>SIDE</th>
-              <th>PRICE</th>
-              <th>PNL</th>
-            </tr>
-          </thead>
-          <tbody></tbody>
-        </table>
+      <div class="v8-card-head v8-tabs-head">
+        <h2 class="v8-tabs-title">HISTORY</h2>
+        <div class="v8-tabs" role="tablist">
+          <button type="button" class="v8-tab v8-tab-active" id="v8_tab_trades" role="tab" aria-selected="true" data-v8-tab="trades">Trade History</button>
+          <div id="v8-exec-history-ui" class="v8-exec-history-ui">
+            <button type="button" class="v8-tab" id="v8_tab_exec" role="tab" aria-selected="false" data-v8-tab="exec">Execution History</button>
+          </div>
+        </div>
+      </div>
+      <div id="v8_pane_trades" class="v8-tab-pane" role="tabpanel">
+        <div class="v8-table-scroll table-scroll">
+          <table id="trades" class="v8-table v8-history-table v8-trades-extended">
+            <thead>
+              <tr>
+                <th>TIME</th>
+                <th>SIDE</th>
+                <th>SIZE</th>
+                <th>ENTRY</th>
+                <th>EXIT</th>
+                <th>PNL</th>
+                <th>FEE</th>
+                <th>STRATEGY</th>
+                <th>SESSION</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
+      <div id="v8_pane_exec" class="v8-tab-pane" role="tabpanel" hidden>
+        <div class="v8-table-scroll table-scroll">
+          <table id="execution_history_v8" class="v8-table v8-history-table v8-exec-history-table">
+            <thead>
+              <tr>
+                <th>TIME</th>
+                <th>STEP</th>
+                <th>ACTION</th>
+                <th>PRICE</th>
+                <th>LATENCY</th>
+                <th>STATUS</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
       </div>
     </article>
   </section>
