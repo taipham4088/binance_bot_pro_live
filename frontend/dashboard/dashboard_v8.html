@@ -1,0 +1,303 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>BOT PRO LIVE — Trading Desk V8</title>
+<link rel="stylesheet" href="/dashboard/css/dashboard_v8.css?v=1">
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+<script src="/dashboard/js/dashboard_v8.js?v=1" defer></script>
+</head>
+<body class="v8-body">
+
+<header class="v8-header">
+  <div class="v8-header-top">
+    <h1 class="v8-title">BOT PRO LIVE</h1>
+    <div class="v8-header-actions">
+      <div class="session-controls v8-session-bar">
+        <label for="session_select">Session</label>
+        <select id="session_select" onchange="onSessionSelectionChanged()">
+          <option value="live">LIVE</option>
+          <option value="shadow">SHADOW</option>
+          <option value="paper">PAPER</option>
+          <option value="backtest">BACKTEST</option>
+        </select>
+        <label class="dual-panel-toggle">
+          <input id="dual_panel_toggle" type="checkbox" onchange="onSessionSelectionChanged()">
+          LIVE | SHADOW
+        </label>
+        <button type="button" class="v8-btn v8-btn-ghost" onclick="openSessionControl()">Sessions</button>
+      </div>
+    </div>
+  </div>
+  <div class="v8-market-strip">
+    <span id="mh-symbol" class="mono">BTCUSDT</span>
+    <span class="v8-sep">|</span>
+    <span id="mh-exchange">BINANCE</span>
+    <span class="v8-sep">|</span>
+    <span>MODE:</span>
+    <span id="mh-mode" class="mh-mode">SHADOW</span>
+    <span class="v8-sep">|</span>
+    <span id="mh-price" class="mono mh-price">Price: —</span>
+    <span class="v8-sep">|</span>
+    <span id="mh-change" class="mono">24h: —</span>
+    <span class="v8-sep">|</span>
+    <span id="mh-funding" class="mono">Funding: —</span>
+    <span class="v8-sep">|</span>
+    <span id="mh-running" class="mh-running unknown">UNKNOWN</span>
+    <span class="v8-sep">|</span>
+    <span id="mh-cpu" class="mono muted">CPU: —</span>
+    <span class="v8-sep">|</span>
+    <span id="mh-mem" class="mono muted">MEM: —</span>
+    <span class="v8-sep">|</span>
+    <span id="mh-uptime" class="mono muted">Uptime: —</span>
+  </div>
+</header>
+
+<main class="v8-main">
+
+  <!-- Row 1: execution overview -->
+  <section class="v8-row v8-row-3" aria-label="Execution overview">
+    <article class="v8-card" id="v8-panel-position" data-v8-modes="live,shadow">
+      <div class="v8-card-head">
+        <h2>POSITION</h2>
+        <span class="v8-card-icon" aria-hidden="true">◫</span>
+      </div>
+      <div id="position" class="v8-card-body"></div>
+    </article>
+    <article class="v8-card" id="v8-panel-execution" data-v8-modes="live,shadow">
+      <div class="v8-card-head">
+        <h2>EXECUTION</h2>
+        <span class="v8-card-icon" aria-hidden="true">⚡</span>
+      </div>
+      <div id="execution" class="v8-card-body"></div>
+    </article>
+    <article class="v8-card" id="v8-panel-strategy" data-v8-modes="live,shadow">
+      <div class="v8-card-head">
+        <h2>STRATEGY SIGNAL</h2>
+        <span class="v8-card-icon" aria-hidden="true">◎</span>
+      </div>
+      <div id="strategy" class="v8-card-body"></div>
+    </article>
+  </section>
+
+  <div class="v8-flow-row" id="v8-flow-row" data-v8-modes="live,shadow,paper,backtest">
+    <div id="v8_flow_breadcrumb" class="v8-flow-text mono">Signal → Decision → Order → Exchange → Fill</div>
+  </div>
+
+  <!-- Row 2: PnL / Risk / Control -->
+  <section class="v8-row v8-row-3 v8-row-tall" aria-label="PnL risk control">
+    <article class="v8-card" id="v8-panel-pnl" data-v8-modes="live,shadow,paper,backtest">
+      <div class="v8-card-head">
+        <h2>PNL</h2>
+        <span class="v8-card-icon" aria-hidden="true">$</span>
+      </div>
+      <div id="backtest_progress" class="v8-backtest-progress">Backtest Idle</div>
+      <div id="pnl" class="v8-card-body"></div>
+    </article>
+    <article class="v8-card" id="v8-panel-risk" data-v8-modes="live,shadow">
+      <div class="v8-card-head">
+        <h2>RISK</h2>
+        <span class="v8-card-icon" aria-hidden="true">⛰</span>
+      </div>
+      <div id="risk" class="v8-card-body"></div>
+    </article>
+    <article class="v8-card v8-card-control" id="v8-panel-control" data-v8-modes="live,shadow,paper,backtest">
+      <div class="v8-card-head">
+        <h2>CONTROL PANEL</h2>
+        <div class="control-actions">
+          <button type="button" id="pause_btn" class="v8-btn v8-btn-warn" onclick="pauseBot()">Pause</button>
+          <button type="button" id="resume_btn" class="v8-btn v8-btn-go" onclick="resumeBot()">Resume</button>
+        </div>
+      </div>
+      <div class="control-panel v8-control-panel">
+        <div class="control-filter">
+          <input id="symbol_filter" type="text" placeholder="Filter symbol…" onkeyup="filterSymbols()">
+        </div>
+        <div class="control-row">
+          <label>Symbol</label>
+          <select id="symbol_select" onchange="pendingButton('symbol_select')"></select>
+          <button type="button" class="v8-btn v8-btn-blue" onclick="setSymbol(this)">Apply</button>
+        </div>
+        <div class="control-row">
+          <label>Exchange</label>
+          <select id="exchange_select" onchange="pendingButton('exchange_select')">
+            <option value="binance">BINANCE</option>
+            <option value="bybit">BYBIT</option>
+            <option value="okx">OKX</option>
+            <option value="paper">PAPER</option>
+          </select>
+          <button type="button" class="v8-btn v8-btn-blue" onclick="setExchange(this)">Apply</button>
+        </div>
+        <div class="control-row v8-risk-stepper">
+          <label>Risk (%)</label>
+          <div class="v8-stepper">
+            <button type="button" class="v8-btn v8-btn-ghost" onclick="adjustRisk(-0.1)">−</button>
+            <input id="risk_input" type="number" value="1" step="0.01" min="0" oninput="pendingButton('risk_input')">
+            <button type="button" class="v8-btn v8-btn-ghost" onclick="adjustRisk(0.1)">+</button>
+          </div>
+          <button type="button" class="v8-btn v8-btn-blue" onclick="setRisk(this)">Apply</button>
+        </div>
+        <div class="control-row">
+          <label>Initial Balance</label>
+          <input id="initial_balance" type="number" value="10000" step="1" oninput="pendingButton('initial_balance')">
+          <button type="button" id="apply_initial_balance" class="v8-btn v8-btn-blue">Apply</button>
+        </div>
+        <div class="control-row">
+          <label>Trade Mode</label>
+          <select id="trade_mode_select" onchange="pendingButton('trade_mode_select')">
+            <option value="dual">DUAL</option>
+            <option value="long">LONG</option>
+            <option value="short">SHORT</option>
+          </select>
+          <button type="button" class="v8-btn v8-btn-blue" onclick="setMode(this)">Apply</button>
+        </div>
+        <div class="control-row">
+          <label>Trading Mode</label>
+          <select id="trading_mode_select" onchange="pendingButton('trading_mode_select')">
+            <option value="backtest">BACKTEST</option>
+            <option value="paper">PAPER</option>
+            <option value="shadow">SHADOW</option>
+            <option value="live">LIVE</option>
+          </select>
+          <button type="button" class="v8-btn v8-btn-blue" onclick="setTradingMode(this)">Apply</button>
+        </div>
+        <div class="control-row">
+          <label>Strategy</label>
+          <select id="strategy_select" onchange="pendingButton('strategy_select')">
+            <option value="range_trend">RANGE TREND</option>
+          </select>
+          <button type="button" class="v8-btn v8-btn-blue" onclick="setStrategy(this)">Apply</button>
+        </div>
+        <div class="v8-kill-row">
+          <button type="button" class="v8-btn v8-btn-kill" onclick="pauseBot()">Kill switch (pause trading)</button>
+        </div>
+      </div>
+    </article>
+  </section>
+
+  <!-- Pipeline full width -->
+  <section class="v8-card v8-pipeline-card" id="v8-panel-pipeline" data-v8-modes="live,shadow,paper,backtest">
+    <div class="v8-card-head">
+      <h2>EXECUTION PIPELINE</h2>
+      <span class="v8-card-icon" aria-hidden="true">➔</span>
+    </div>
+    <div id="execution_pipeline" class="v8-pipeline-wrap"></div>
+    <p id="v8_pipeline_meta" class="v8-pipeline-meta mono">—</p>
+  </section>
+
+  <!-- Observability + right rail -->
+  <section class="v8-row v8-row-obs" aria-label="Observability">
+    <div class="v8-obs-grid">
+      <article class="v8-card" id="v8-panel-reconciliation" data-v8-modes="live,shadow">
+        <div class="v8-card-head"><h2>RECONCILIATION</h2></div>
+        <div id="reconciliation" class="v8-card-body"></div>
+      </article>
+      <article class="v8-card" id="v8-panel-slippage" data-v8-modes="live,shadow">
+        <div class="v8-card-head"><h2>SLIPPAGE</h2></div>
+        <div id="slippage" class="v8-card-body"></div>
+      </article>
+      <article class="v8-card" id="v8-panel-latency" data-v8-modes="live">
+        <div class="v8-card-head"><h2>LATENCY</h2></div>
+        <div id="latency" class="v8-card-body"></div>
+      </article>
+    </div>
+    <aside class="v8-rail">
+      <article class="v8-card v8-rail-card" id="v8-panel-alerts" data-v8-modes="live,shadow">
+        <div class="v8-card-head"><h2>ALERTS</h2></div>
+        <div id="alerts" class="v8-card-body v8-alerts-body"></div>
+      </article>
+      <article class="v8-card v8-rail-card v8-equity-card" id="v8-panel-equity" data-v8-modes="live,shadow,backtest">
+        <div class="v8-card-head"><h2>EQUITY CURVE</h2></div>
+        <div class="v8-chart-wrap">
+          <canvas id="equityChart" height="120"></canvas>
+        </div>
+      </article>
+    </aside>
+  </section>
+
+  <!-- Metrics + trade history -->
+  <section class="v8-row v8-row-bottom" aria-label="Performance">
+    <div class="v8-bottom-grid">
+      <article class="v8-card" id="v8-panel-metrics" data-v8-modes="live,shadow">
+        <div class="v8-card-head"><h2>METRICS</h2></div>
+        <div id="metrics" class="v8-card-body"></div>
+      </article>
+      <article class="v8-card" id="v8-panel-performance" data-v8-modes="live,shadow,backtest">
+        <div class="v8-card-head"><h2>PERFORMANCE</h2></div>
+        <div id="performance" class="v8-card-body"></div>
+      </article>
+      <article class="v8-card" id="v8-panel-system" data-v8-modes="live,shadow">
+        <div class="v8-card-head"><h2>SYSTEM</h2></div>
+        <div id="system" class="v8-card-body"></div>
+      </article>
+    </div>
+    <article class="v8-card v8-trades-card" id="v8-panel-trades" data-v8-modes="live,shadow,paper,backtest">
+      <div class="v8-card-head"><h2>TRADE HISTORY</h2></div>
+      <div class="table-scroll">
+        <table id="trades" class="v8-table v8-compact-history">
+          <thead>
+            <tr>
+              <th>TIME</th>
+              <th>SIDE</th>
+              <th>PRICE</th>
+              <th>PNL</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </article>
+  </section>
+
+</main>
+
+<div id="sessionControlModal" class="session-control-modal">
+  <div class="session-control-box">
+    <div class="session-control-header">
+      <h3>SESSION CONTROL</h3>
+      <button type="button" class="session-close-btn" onclick="closeSessionControl()">Close</button>
+    </div>
+    <div class="session-live-status">
+      <div>LIVE: <span id="session_status_live">UNKNOWN</span></div>
+      <div>SHADOW: <span id="session_status_shadow">UNKNOWN</span></div>
+      <div>PAPER: <span id="session_status_paper">UNKNOWN</span></div>
+      <div>BACKTEST: <span id="session_status_backtest">UNKNOWN</span></div>
+    </div>
+    <div class="session-control">
+      <div class="session-row">
+        <span>LIVE</span>
+        <button type="button" data-session="live" data-action="start">Start</button>
+        <button type="button" data-session="live" data-action="stop">Stop</button>
+        <button type="button" data-session="live" data-action="restart">Restart</button>
+        <button type="button" data-session="live" data-action="export">Export</button>
+      </div>
+      <div class="session-row">
+        <span>SHADOW</span>
+        <button type="button" data-session="shadow" data-action="start">Start</button>
+        <button type="button" data-session="shadow" data-action="stop">Stop</button>
+        <button type="button" data-session="shadow" data-action="restart">Restart</button>
+        <button type="button" data-session="shadow" data-action="export">Export</button>
+      </div>
+      <div class="session-row">
+        <span>PAPER</span>
+        <button type="button" data-session="paper" data-action="start">Start</button>
+        <button type="button" data-session="paper" data-action="stop">Stop</button>
+        <button type="button" data-session="paper" data-action="restart">Restart</button>
+        <button type="button" data-session="paper" data-action="export">Export</button>
+      </div>
+      <div class="session-row">
+        <span>BACKTEST</span>
+        <button type="button" data-session="backtest" data-action="start">Start</button>
+        <button type="button" data-session="backtest" data-action="stop">Stop</button>
+        <button type="button" data-session="backtest" data-action="restart">Restart</button>
+        <button type="button" data-session="backtest" data-action="import">Import</button>
+        <button type="button" data-session="backtest" data-action="export">Export</button>
+      </div>
+    </div>
+    <div id="session_control_status" class="session-control-status"></div>
+  </div>
+</div>
+
+</body>
+</html>

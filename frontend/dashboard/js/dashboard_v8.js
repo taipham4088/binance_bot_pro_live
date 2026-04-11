@@ -1,0 +1,2329 @@
+let grid = null
+let equityChart = null
+let equityHistory = []
+let controlInitialized = false
+
+/** True only after server config merged into lastApplied + DOM selects hydrated (avoids Ctrl+F5 all-blue). */
+let controlPanelBaselineReady = false
+
+/** After Apply, one dashboard refresh can carry stale config and repaint pending (blue) over green flash. */
+let skipNextControlPanelRefresh = false
+
+/** Server-backed values for control rows; pending UI = select/input value !== last applied */
+const lastAppliedControlValues = {}
+let selectedDashboardSession = "live"
+let dualPanelModeEnabled = false
+let dashboardRequestId = 0
+let tradesRequestId = 0
+let executionHistoryRequestId = 0
+const sessionRuntimeStatus = {
+  live: "UNKNOWN",
+  shadow: "UNKNOWN",
+  paper: "UNKNOWN",
+  backtest: "UNKNOWN",
+}
+
+/** Latest /api/dashboard/metrics payload for V8 summary cards (PnL profit factor, etc.). */
+let lastMetricsSummary = null
+
+const v8AppStartMs = Date.now()
+
+function applyDashboardModeVisibility() {
+  const m = (selectedDashboardSession || "live").toLowerCase()
+  document.body.dataset.v8Session = m
+  document.querySelectorAll("[data-v8-modes]").forEach((el) => {
+    const raw = el.getAttribute("data-v8-modes") || ""
+    if (!raw.trim()) return
+    const modes = raw
+      .split(",")
+      .map((s) => s.trim().toLowerCase())
+      .filter(Boolean)
+    const show = modes.includes(m)
+    el.hidden = !show
+    el.setAttribute("aria-hidden", show ? "false" : "true")
+  })
+}
+
+function updateHeaderRunning() {
+  const el = document.getElementById("mh-running")
+  if (!el) return
+  const st = sessionRuntimeStatus[selectedDashboardSession] || "UNKNOWN"
+  el.textContent = st
+  el.classList.remove("running", "stopped", "unknown", "finished", "error")
+  if (st === "RUNNING") el.classList.add("running")
+  else if (st === "STOPPED") el.classList.add("stopped")
+  else if (st === "FINISHED") el.classList.add("finished")
+  else if (st === "ERROR") el.classList.add("error")
+  else el.classList.add("unknown")
+}
+
+function syncMarketHeaderFromConfig(cfg) {
+  if (!cfg) return
+  const symEl = document.getElementById("mh-symbol")
+  const exEl = document.getElementById("mh-exchange")
+  const modeEl = document.getElementById("mh-mode")
+  if (symEl && cfg.symbol) symEl.textContent = String(cfg.symbol).toUpperCase()
+  if (exEl && cfg.exchange) exEl.textContent = String(cfg.exchange).toUpperCase()
+  if (modeEl && cfg.mode != null) modeEl.textContent = String(cfg.mode).toUpperCase()
+}
+
+function adjustRisk(delta) {
+  const el = document.getElementById("risk_input")
+  if (!el) return
+  let v = Number(String(el.value ?? "").trim())
+  if (!Number.isFinite(v)) v = 1
+  v = Math.max(0.01, Math.round((v + delta) * 100) / 100)
+  el.value = String(v)
+  pendingButton("risk_input")
+}
+
+function normalizeDashboardTradeMode(v) {
+  const x = String(v || "dual").toLowerCase()
+  if (x === "both") return "dual"
+  if (x === "long" || x === "short" || x === "dual") return x
+  return "dual"
+}
+
+function normalizeDashboardStrategy(_v) {
+  return "range_trend"
+}
+
+function sessionControlStatus(msg, isError = false) {
+  const el = document.getElementById("session_control_status")
+  if (!el) return
+  el.textContent = msg || ""
+  el.style.color = isError ? "#f87171" : "#cbd5e1"
+}
+
+function openSessionControl() {
+  const modal = document.getElementById("sessionControlModal")
+  if (!modal) return
+  modal.style.display = "flex"
+  sessionControlStatus("")
+  refreshSessionStatuses()
+}
+
+function closeSessionControl() {
+  const modal = document.getElementById("sessionControlModal")
+  if (!modal) return
+  modal.style.display = "none"
+}
+
+async function postSessionControl(path) {
+  const res = await fetch(path, { method: "POST" })
+  if (!res.ok) {
+    let detail = ""
+    try {
+      const body = await res.json()
+      detail = body?.detail ? `: ${body.detail}` : ""
+    } catch (_e) {
+      detail = ""
+    }
+    const err = new Error(`HTTP ${res.status}${detail}`)
+    err.status = res.status
+    err.detail = detail
+    throw err
+  }
+  return res.json().catch(() => ({}))
+}
+
+document.addEventListener("click", async (e) => {
+  const t = e.target
+  const session = t.dataset?.session
+  const action = t.dataset?.action
+  if (!session || !action) return
+
+  const sid = String(session).toLowerCase()
+
+  if (action === "export") {
+    exportCandle(sid)
+    return
+  }
+
+  if (action === "import") {
+    const path = prompt("Enter CSV path")
+    if (path === null) return
+    const trimmed = String(path).trim()
+    if (!trimmed) return
+    try {
+      await ensureSessionCreated(sid)
+      const res = await fetch("/api/session/import", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          mode: sid,
+          path: trimmed,
+        }),
+      })
+      if (!res.ok) {
+        let detail = ""
+        try {
+          const body = await res.json()
+          detail = body?.detail != null ? `: ${body.detail}` : ""
+        } catch (_err) {
+          detail = ""
+        }
+        sessionControlStatus(
+          `IMPORT ${sid.toUpperCase()} failed — HTTP ${res.status}${detail}`,
+          true
+        )
+        await refreshSessionStatuses()
+        return
+      }
+      sessionControlStatus(`IMPORT ${sid.toUpperCase()} ok`)
+      await refreshSessionStatuses()
+    } catch (err) {
+      sessionControlStatus(
+        `IMPORT ${sid.toUpperCase()} failed — ${err?.message || err}`,
+        true
+      )
+      await refreshSessionStatuses()
+    }
+    return
+  }
+
+  try {
+    if (action === "start") {
+      await ensureSessionCreated(sid)
+    }
+    const res = await fetch(`/api/session/${action}`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        mode: sid,
+      }),
+    })
+    if (!res.ok) {
+      let detail = ""
+      try {
+        const body = await res.json()
+        detail = body?.detail != null ? `: ${body.detail}` : ""
+      } catch (_err) {
+        detail = ""
+      }
+      sessionControlStatus(
+        `${action.toUpperCase()} ${sid.toUpperCase()} failed — HTTP ${res.status}${detail}`,
+        true
+      )
+      await refreshSessionStatuses()
+      return
+    }
+    sessionControlStatus(`${action.toUpperCase()} ${sid.toUpperCase()} ok`)
+    await refreshSessionStatuses()
+    await refreshAfterLifecycleAction()
+  } catch (err) {
+    sessionControlStatus(
+      `${action.toUpperCase()} ${sid.toUpperCase()} failed — ${err?.message || err}`,
+      true
+    )
+    await refreshSessionStatuses()
+  }
+})
+
+async function ensureSessionCreated(sessionId) {
+  try {
+    await postSessionControl(`/api/system/session/create?mode=${encodeURIComponent(sessionId)}`)
+  } catch (e) {
+    const msg = String(e?.message || "").toLowerCase()
+    const detail = String(e?.detail || "").toLowerCase()
+    // Idempotent create: ignore only "already exists" style errors.
+    if (
+      msg.includes("already exists") ||
+      msg.includes("exists") ||
+      detail.includes("already exists") ||
+      detail.includes("exists")
+    ) {
+      return
+    }
+    throw e
+  }
+}
+
+async function startSession(sessionId) {
+  await ensureSessionCreated(sessionId)
+  return postSessionControl(`/api/system/session/start/${encodeURIComponent(sessionId)}`)
+}
+
+async function stopSession(sessionId) {
+  return postSessionControl(`/api/system/session/stop/${encodeURIComponent(sessionId)}`)
+}
+
+async function sessionAction(sessionId, action, btn) {
+  const original = btn ? btn.textContent : ""
+  try {
+    if (btn) {
+      btn.disabled = true
+      btn.textContent = "..."
+    }
+    sessionControlStatus(`${action.toUpperCase()} ${sessionId.toUpperCase()} in progress...`)
+    if (action === "start") {
+      await startSession(sessionId)
+    } else if (action === "stop") {
+      await stopSession(sessionId)
+    } else if (action === "restart") {
+      await stopSession(sessionId)
+      await startSession(sessionId)
+    } else {
+      throw new Error(`Unsupported action: ${action}`)
+    }
+    sessionControlStatus(`${action.toUpperCase()} ${sessionId.toUpperCase()} success`)
+    await refreshSessionStatuses()
+    await refreshAfterLifecycleAction()
+  } catch (e) {
+    sessionControlStatus(`${action.toUpperCase()} ${sessionId.toUpperCase()} failed - ${e.message}`, true)
+    await refreshSessionStatuses()
+  } finally {
+    if (btn) {
+      btn.disabled = false
+      btn.textContent = original
+    }
+  }
+}
+
+async function exportCandle(session) {
+  const sid = String(session || "live").toLowerCase()
+  try {
+    if (sid === "backtest") {
+      const res = await fetch("/api/session/export", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ mode: sid }),
+      })
+      const data = await res.json().catch(() => ({}))
+      if (!res.ok) {
+        const msg = data?.detail || data?.error || `HTTP ${res.status}`
+        sessionControlStatus(`Backtest export failed: ${msg}`, true)
+        alert("Backtest export failed: " + msg)
+        return
+      }
+      const fp = data.file || data.path || ""
+      sessionControlStatus(`Backtest exported successfully → ${fp}`, false)
+      alert(`Backtest exported successfully\nFile: ${fp}`)
+      return
+    }
+
+    const res = await fetch(
+      `/api/debug/export-candle?session=${encodeURIComponent(sid)}`
+    )
+    const data = await res.json()
+    if (data.ok) {
+      console.log("[EXPORT]", data)
+      console.log(`[CANDLE EXPORT] ${sid} ${data.rows} bars`)
+      sessionControlStatus(
+        `[CANDLE EXPORT] ${sid} ${data.rows} bars → ${data.path}`,
+        false
+      )
+      alert(
+        `Exported ${data.rows} bars\n` +
+        `File: ${data.path}`
+      )
+    } else {
+      sessionControlStatus(`Export failed: ${data.error || "unknown"}`, true)
+      alert("Export failed: " + (data.error || "unknown"))
+    }
+  } catch (err) {
+    console.error(err)
+    sessionControlStatus("Export error", true)
+    alert("Export error")
+  }
+}
+
+async function fetchJsonSafe(url) {
+  const res = await fetch(url)
+  if (!res.ok) {
+    throw new Error(`HTTP ${res.status} ${url}`)
+  }
+  return res.json()
+}
+
+/** Backend + /api/control/risk use risk as a fraction (e.g. 0.01 = 1%). Input shows percent. */
+function riskFractionToDisplayPercent(fraction) {
+  const n = Number(fraction)
+  if (!Number.isFinite(n) || n < 0) return ""
+  const pct = n * 100
+  if (!Number.isFinite(pct)) return ""
+  return String(pct)
+}
+
+function riskPercentInputToFraction(raw) {
+  const n = Number(String(raw ?? "").trim())
+  if (!Number.isFinite(n) || n <= 0) return NaN
+  return n / 100
+}
+
+function collectSessionConfigPayload() {
+  const tradeMode = document.getElementById("trade_mode_select")?.value
+  const riskRaw = document.getElementById("risk_input")?.value
+  const initialRaw = document.getElementById("initial_balance")?.value
+  const strategy = document.getElementById("strategy_select")?.value
+  const rf = riskPercentInputToFraction(riskRaw)
+  return {
+    trade_mode: tradeMode,
+    risk_percent: Number.isFinite(rf) ? rf : 0.01,
+    initial_balance: Number(initialRaw),
+    strategy,
+  }
+}
+
+async function syncSessionConfigFromControlPanel() {
+  const payload = collectSessionConfigPayload()
+  const sid = selectedDashboardSession || "live"
+  const res = await fetch(
+    `/api/session/config?session=${encodeURIComponent(sid)}`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(payload),
+    }
+  )
+  let body = {}
+  try {
+    body = await res.json()
+  } catch (_err) {
+    body = {}
+  }
+  if (!res.ok || body.error) {
+    const detail =
+      body?.detail != null
+        ? `: ${body.detail}`
+        : body?.error != null
+          ? `: ${body.error}`
+          : ""
+    throw new Error(`HTTP ${res.status}${detail}`)
+  }
+}
+
+/** After /api/control/* succeeds; session POST can fail if session row missing — do not block Apply UI. */
+async function syncSessionConfigAfterControl() {
+  try {
+    await syncSessionConfigFromControlPanel()
+  } catch (e) {
+    console.warn("[control panel] session config sync skipped:", e?.message || e)
+  }
+}
+
+/** Hydrate entire control panel from GET /api/session/config (per-session store only; never from /api/dashboard config). */
+async function loadSessionConfig() {
+  const sid = selectedDashboardSession || "live"
+  try {
+    const res = await fetch(`/api/session/config?session=${encodeURIComponent(sid)}`)
+    const data = await res.json().catch(() => ({}))
+    if (!res.ok || data.error) {
+      return
+    }
+
+    const tms = document.getElementById("trading_mode_select")
+    if (tms && Array.from(tms.options).some((o) => o.value === sid)) {
+      tms.value = sid
+    }
+
+    const ex = document.getElementById("exchange_select")
+    if (ex && data.exchange != null && String(data.exchange) !== "") {
+      const ev = String(data.exchange)
+      if (Array.from(ex.options).some((o) => o.value === ev)) {
+        ex.value = ev
+      }
+    }
+
+    const sym = document.getElementById("symbol_select")
+    if (sym && data.symbol != null && String(data.symbol) !== "") {
+      const sv = String(data.symbol)
+      if (Array.from(sym.options).some((o) => o.value === sv)) {
+        sym.value = sv
+      }
+    }
+
+    const tm = document.getElementById("trade_mode_select")
+    if (tm && data.trade_mode != null && String(data.trade_mode) !== "") {
+      const nv = normalizeDashboardTradeMode(data.trade_mode)
+      if (Array.from(tm.options).some((o) => o.value === nv)) {
+        tm.value = nv
+      }
+    }
+
+    const ri = document.getElementById("risk_input")
+    if (
+      ri &&
+      data.risk_percent !== undefined &&
+      data.risk_percent !== null &&
+      !Number.isNaN(Number(data.risk_percent))
+    ) {
+      ri.value = riskFractionToDisplayPercent(data.risk_percent)
+    }
+
+    const ib = document.getElementById("initial_balance")
+    if (
+      ib &&
+      data.initial_balance !== undefined &&
+      data.initial_balance !== null &&
+      !Number.isNaN(Number(data.initial_balance))
+    ) {
+      ib.value = String(data.initial_balance)
+    }
+
+    const ss = document.getElementById("strategy_select")
+    if (ss && data.strategy != null && String(data.strategy) !== "") {
+      const raw = String(data.strategy)
+      const norm = normalizeDashboardStrategy(raw)
+      const pick = Array.from(ss.options).some((o) => o.value === raw) ? raw : norm
+      if (Array.from(ss.options).some((o) => o.value === pick)) {
+        ss.value = pick
+      }
+    }
+
+    syncControlLastAppliedFromConfig({
+      mode: sid,
+      trade_mode: data.trade_mode,
+      risk_percent: data.risk_percent,
+      strategy: data.strategy,
+      exchange: data.exchange,
+      symbol: data.symbol,
+    })
+    if (
+      data.initial_balance !== undefined &&
+      data.initial_balance !== null &&
+      !Number.isNaN(Number(data.initial_balance))
+    ) {
+      lastAppliedControlValues["initial_balance"] = String(Number(data.initial_balance))
+    }
+
+    if (!controlPanelBaselineReady) {
+      applySymbolSelectFromBaseline()
+      controlInitialized = true
+      controlPanelBaselineReady = true
+    }
+
+    refreshControlApplyButtonStates()
+  } catch (_e) {
+    /* session may not exist yet */
+  }
+}
+
+async function refreshAllPanels() {
+  await loadDashboard()
+  await updateTrades()
+  await updateExecutionHistory()
+
+  const qp = getSessionQueryParams()
+  try {
+    const [position, pnl, risk] = await Promise.all([
+      fetchJsonSafe(`/api/dashboard/position?${qp}`),
+      fetchJsonSafe(`/api/dashboard/pnl?${qp}`),
+      fetchJsonSafe(`/api/dashboard/risk-status?${qp}`),
+    ])
+
+    updatePosition({ position })
+    updatePnL({ pnl })
+    updateRisk({ risk_status: risk, pnl })
+  } catch (e) {
+    console.log("refreshAllPanels partial refresh error", e)
+  }
+}
+
+async function refreshAfterLifecycleAction() {
+  await refreshAllPanels()
+  // Post-lifecycle state can settle asynchronously; perform short retries.
+  for (let i = 0; i < 2; i++) {
+    await new Promise((resolve) => setTimeout(resolve, 600))
+    await refreshAllPanels()
+  }
+}
+
+function normalizeSessionStatus(value) {
+  const s = String(value || "").trim().toUpperCase()
+  if (s === "RUNNING") return "RUNNING"
+  if (s === "FINISHED") return "FINISHED"
+  if (s === "ERROR") return "ERROR"
+  if (s === "STOPPED" || s === "IDLE" || s === "CREATED") return "STOPPED"
+  return "UNKNOWN"
+}
+
+function setSessionStatusEl(id, status) {
+  const el = document.getElementById(id)
+  if (!el) return
+  const text = normalizeSessionStatus(status)
+  el.textContent = text
+  const key = id.replace(/^session_status_/, "")
+  if (key && Object.prototype.hasOwnProperty.call(sessionRuntimeStatus, key)) {
+    sessionRuntimeStatus[key] = text
+  }
+  el.classList.remove("running", "stopped", "unknown", "finished", "error")
+  if (text === "RUNNING") el.classList.add("running")
+  else if (text === "STOPPED") el.classList.add("stopped")
+  else if (text === "FINISHED") el.classList.add("finished")
+  else if (text === "ERROR") el.classList.add("error")
+  else el.classList.add("unknown")
+}
+
+function readStatusFromSessionsPayload(payload, sessionId) {
+  if (!payload) return "UNKNOWN"
+  if (Array.isArray(payload)) {
+    const row = payload.find((x) => String(x?.id || x?.session_id || "").toLowerCase() === sessionId)
+    return row?.status || "UNKNOWN"
+  }
+  if (Array.isArray(payload.sessions)) {
+    const row = payload.sessions.find((x) => String(x?.id || x?.session_id || "").toLowerCase() === sessionId)
+    return row?.status || "UNKNOWN"
+  }
+  if (payload.sessions && typeof payload.sessions === "object") {
+    const row = payload.sessions[sessionId]
+    if (row && typeof row === "object") return row.status || "UNKNOWN"
+    if (typeof row === "string") return row
+  }
+  if (payload[sessionId] && typeof payload[sessionId] === "object") {
+    return payload[sessionId].status || "UNKNOWN"
+  }
+  return "UNKNOWN"
+}
+
+async function refreshSessionStatuses() {
+  try {
+    const res = await fetch("/api/system/sessions")
+    if (!res.ok) throw new Error(`HTTP ${res.status}`)
+    const data = await res.json()
+    setSessionStatusEl("session_status_live", readStatusFromSessionsPayload(data, "live"))
+    setSessionStatusEl("session_status_shadow", readStatusFromSessionsPayload(data, "shadow"))
+    setSessionStatusEl("session_status_paper", readStatusFromSessionsPayload(data, "paper"))
+    setSessionStatusEl("session_status_backtest", readStatusFromSessionsPayload(data, "backtest"))
+  } catch (_e) {
+    setSessionStatusEl("session_status_live", "UNKNOWN")
+    setSessionStatusEl("session_status_shadow", "UNKNOWN")
+    setSessionStatusEl("session_status_paper", "UNKNOWN")
+    setSessionStatusEl("session_status_backtest", "UNKNOWN")
+  }
+  updateHeaderRunning()
+}
+
+function getSessionQueryParams() {
+  const params = new URLSearchParams()
+  params.set("session", selectedDashboardSession)
+  if (dualPanelModeEnabled) {
+    params.set("dual", "1")
+  }
+  return params.toString()
+}
+
+/** Scope /api/control/* mutations to the dashboard-selected session (per-session JSON + live object). */
+function controlPanelSessionQuery() {
+  const s = selectedDashboardSession || "live"
+  return `?session=${encodeURIComponent(s)}`
+}
+
+function getTradeHistoryQueryParams() {
+  const params = new URLSearchParams()
+  // Always bind history to selected session (UI isolation).
+  params.set("session_id", selectedDashboardSession)
+  params.set("session", selectedDashboardSession)
+  return params.toString()
+}
+
+function getExecutionHistoryQueryParams() {
+  const params = new URLSearchParams()
+  // Never couple history to RUNNING/dual state; selected session only.
+  params.set("session", selectedDashboardSession)
+  return params.toString()
+}
+
+function hydrateSessionSelectorFromStorage() {
+  const savedSession = (localStorage.getItem("dashboard-session") || "live").toLowerCase()
+  const savedDual = localStorage.getItem("dashboard-dual-panel") === "1"
+  const select = document.getElementById("session_select")
+  const dual = document.getElementById("dual_panel_toggle")
+
+  selectedDashboardSession = savedSession
+  dualPanelModeEnabled = savedDual
+
+  if (select) {
+    const hasValue = Array.from(select.options).some((o) => o.value === savedSession)
+    select.value = hasValue ? savedSession : "live"
+    selectedDashboardSession = select.value
+  }
+
+  if (dual) {
+    dual.checked = savedDual
+    dualPanelModeEnabled = dual.checked
+  }
+  applyDashboardModeVisibility()
+}
+
+async function onSessionSelectionChanged() {
+  const select = document.getElementById("session_select")
+  const dual = document.getElementById("dual_panel_toggle")
+  selectedDashboardSession = select ? String(select.value || "live").toLowerCase() : "live"
+  dualPanelModeEnabled = dual ? dual.checked === true : false
+  localStorage.setItem("dashboard-session", selectedDashboardSession)
+  localStorage.setItem("dashboard-dual-panel", dualPanelModeEnabled ? "1" : "0")
+  await loadSessionConfig()
+  await loadDashboard()
+  await updateTrades()
+  await updateExecutionHistory()
+  applyDashboardModeVisibility()
+}
+
+function markControlApplyCommitted(elementId, value) {
+  skipNextControlPanelRefresh = true
+  lastAppliedControlValues[elementId] = String(value)
+}
+
+function syncControlLastAppliedFromConfig(config) {
+  if (!config) return
+  const pairs = [
+    ["trade_mode_select", "trade_mode"],
+    ["trading_mode_select", "mode"],
+    ["strategy_select", "strategy"],
+    ["exchange_select", "exchange"],
+    ["symbol_select", "symbol"],
+    ["risk_input", "risk_percent"],
+  ]
+  for (const [elementId, configKey] of pairs) {
+    const v = config[configKey]
+    if (configKey === "risk_percent") {
+      if (v !== undefined && v !== null && !Number.isNaN(Number(v))) {
+        lastAppliedControlValues[elementId] = riskFractionToDisplayPercent(Number(v))
+      }
+      continue
+    }
+    if (v !== undefined && v !== null && v !== "") {
+      lastAppliedControlValues[elementId] = String(v)
+    }
+  }
+}
+
+const CONTROL_APPLY_IDS = [
+  "symbol_select",
+  "exchange_select",
+  "risk_input",
+  "initial_balance",
+  "trade_mode_select",
+  "trading_mode_select",
+  "strategy_select",
+]
+
+function refreshControlApplyButtonStates() {
+  if (!controlPanelBaselineReady) return
+  if (skipNextControlPanelRefresh) {
+    skipNextControlPanelRefresh = false
+    return
+  }
+  for (const id of CONTROL_APPLY_IDS) {
+    pendingButton(id)
+  }
+}
+
+function applySymbolSelectFromBaseline() {
+  const desired = lastAppliedControlValues["symbol_select"]
+  const select = document.getElementById("symbol_select")
+  if (!desired || !select || !select.options.length) return
+  const has = Array.from(select.options).some((o) => o.value === desired)
+  if (has) select.value = desired
+}
+
+document.addEventListener("DOMContentLoaded", function(){
+
+  applyDashboardModeVisibility()
+
+  // Symbol list must exist before hydrating from /api/dashboard (avoids race → false “pending”).
+  ;(async function bootstrapDashboardControlPanel() {
+    hydrateSessionSelectorFromStorage()
+    await loadSymbols()
+    await loadDashboard()
+    await updateTrades()
+    await updateExecutionHistory()
+  })()
+
+  // nếu bạn CHƯA chuyển hẳn sang WebSocket thì giữ polling
+  setInterval(loadDashboard,3000)
+  setInterval(updateTrades,3000)
+  setInterval(updateExecutionHistory,5000)
+
+  // nếu đã dùng WS realtime thì có thể bật:
+  initWebSocket()
+  renderExecutionPipeline()
+  initMarketWS()
+  loadMarket()
+  setInterval(loadMarket,5000)
+
+  const modal = document.getElementById("sessionControlModal")
+  if (modal) {
+    modal.addEventListener("click", function (e) {
+      if (e.target === modal) {
+        closeSessionControl()
+      }
+    })
+  }
+
+  document.getElementById("apply_initial_balance")?.addEventListener("click", async () => {
+    const el = document.getElementById("initial_balance")
+    const btn = document.getElementById("apply_initial_balance")
+    const value = el?.value
+    try {
+      await syncSessionConfigFromControlPanel()
+      markControlApplyCommitted("initial_balance", String(Number(value)))
+      if (btn) flashButton(btn)
+    } catch (e) {
+      console.warn("[control panel] initial balance apply failed:", e?.message || e)
+    }
+  })
+})
+
+async function loadDashboard(){
+
+try{
+const requestId = ++dashboardRequestId
+await refreshSessionStatuses()
+updateHeaderRunning()
+
+try {
+  lastMetricsSummary = await fetchJsonSafe(`/api/dashboard/metrics?${getSessionQueryParams()}`)
+} catch (_e) {
+  lastMetricsSummary = null
+}
+
+const res = await fetch(`/api/dashboard?${getSessionQueryParams()}`)
+
+if(!res.ok) return
+
+const data = await res.json()
+if(requestId !== dashboardRequestId) return
+console.log("dashboard data:",data)
+
+if(!data) return
+
+syncMarketHeaderFromConfig(data.config)
+
+updatePosition(data)
+updatePnL(data)
+updateTrades()
+
+updateSystem(data)
+updateExecution(data)
+updateRisk(data)
+updateReconciliation(data)
+
+updateStrategy(data)
+updateMarketBias(data)
+updateMetrics(data)
+updatePerformance(data)
+// Pause / Resume only (global trading_enabled — not session control fields)
+if(data.config){
+
+const paused = data.config.trading_enabled === false
+
+if(paused){
+
+document.getElementById("pause_btn").style.background = "#ef4444"
+document.getElementById("pause_btn").style.color = "#fff"
+
+document.getElementById("resume_btn").style.background = ""
+document.getElementById("resume_btn").style.color = ""
+
+}else{
+
+document.getElementById("resume_btn").style.background = "#22c55e"
+document.getElementById("resume_btn").style.color = "#000"
+
+document.getElementById("pause_btn").style.background = ""
+document.getElementById("pause_btn").style.color = ""
+
+}
+
+}
+
+await loadSessionConfig()
+
+if(!controlPanelBaselineReady){
+applySymbolSelectFromBaseline()
+controlInitialized = true
+controlPanelBaselineReady = true
+refreshControlApplyButtonStates()
+}
+
+updateSlippage(data)
+updateLatency(data)
+updateAlerts(data)
+updateExecutionPipeline(data)
+updateV8PipelineBreadcrumb(data)
+updateExecutionHistory()
+updateOrderLifecycle(data)
+
+}catch(e){
+
+console.log("dashboard error", e)
+
+}
+
+}
+
+function togglePanel(id){
+
+const el = document.querySelector(`[gs-id="${id}"]`)
+
+if(!el) return
+
+if(el.classList.contains("hidden-panel")){
+
+el.classList.remove("hidden-panel")
+el.style.display="block"
+
+}else{
+
+el.classList.add("hidden-panel")
+el.style.display="none"
+
+}
+
+saveHiddenPanels()
+
+}
+
+async function pauseBot(){
+
+try{
+
+await fetch("/api/control/pause",{
+method:"POST"
+})
+
+// đổi màu
+document.getElementById("pause_btn").style.background = "#ef4444"
+document.getElementById("pause_btn").style.color = "#fff"
+
+document.getElementById("resume_btn").style.background = ""
+document.getElementById("resume_btn").style.color = ""
+
+}catch(e){
+
+console.error(e)
+
+}
+
+}
+
+async function resumeBot(){
+
+try{
+
+await fetch("/api/control/resume",{
+method:"POST"
+})
+
+// đổi màu
+document.getElementById("resume_btn").style.background = "#22c55e"
+document.getElementById("resume_btn").style.color = "#000"
+
+document.getElementById("pause_btn").style.background = ""
+document.getElementById("pause_btn").style.color = ""
+
+}catch(e){
+
+console.error(e)
+
+}
+
+}
+
+function resetLayout(){
+
+localStorage.removeItem("gridstack-layout")
+
+location.reload()
+
+}
+
+function saveHiddenPanels(){
+
+const hidden=[]
+
+document.querySelectorAll(".hidden-panel").forEach(el=>{
+
+hidden.push(el.getAttribute("gs-id"))
+
+})
+
+localStorage.setItem(
+"hidden-panels",
+JSON.stringify(hidden)
+)
+
+}
+
+function restoreHiddenPanels(){
+
+const hidden = JSON.parse(
+localStorage.getItem("hidden-panels")
+) || []
+
+hidden.forEach(id => {
+
+const el = document.querySelector(`[gs-id="${id}"]`)
+
+if(el){
+
+el.style.display="none"
+el.classList.add("hidden-panel")
+
+}
+
+})
+
+}
+
+function showAllPanels(){
+
+document.querySelectorAll(".grid-stack-item").forEach(el=>{
+el.style.display="block"
+el.classList.remove("hidden-panel")
+})
+
+localStorage.removeItem("hidden-panels")
+
+}
+
+function openPanelManager(){
+
+const manager=document.getElementById("panelManager")
+
+manager.style.display="flex"
+
+buildPanelList()
+
+}
+
+function closePanelManager(){
+
+document.getElementById("panelManager").style.display="none"
+
+}
+
+function buildPanelList(){
+
+const container=document.getElementById("panelList")
+
+container.innerHTML=""
+
+document.querySelectorAll(".grid-stack-item").forEach(panel=>{
+
+const id=panel.getAttribute("gs-id")
+
+const hidden=panel.classList.contains("hidden-panel")
+
+const row=document.createElement("label")
+
+row.innerHTML=`
+<input type="checkbox" ${hidden?"":"checked"} onchange="togglePanel('${id}')">
+${id}
+`
+
+container.appendChild(row)
+
+})
+
+}
+
+function updatePipeline(data){
+
+const el=document.getElementById("execution_pipeline")
+
+if(!el) return
+
+const steps=[
+"Signal",
+"Decision",
+"Order",
+"Exchange",
+"Fill",
+"Position"
+]
+
+let html='<div class="pipeline">'
+
+steps.forEach(s=>{
+html+=`<div class="pipeline-step">${s}</div>`
+})
+
+html+='</div>'
+
+el.innerHTML=html
+
+}
+
+function showAlert(msg){
+
+const container=document.getElementById("alertOverlay")
+
+const div=document.createElement("div")
+
+div.className="alert-box"
+
+div.innerText=msg
+
+container.appendChild(div)
+
+setTimeout(()=>{
+div.remove()
+},5000)
+
+}
+
+function initWebSocket(){
+
+const session_id = "live_shadow"
+
+const ws = new WebSocket(
+`ws://127.0.0.1:8000/ws/state/${session_id}`
+)
+
+ws.onopen = () => {
+console.log("WS connected")
+}
+
+ws.onmessage = (event) => {
+
+const msg = JSON.parse(event.data)
+
+// websocket của bạn đôi khi có {type, data}
+const data = msg.data || msg
+
+// POSITION
+if(data.position){
+updatePosition(data)
+updateStrategy(data)
+updateOrderLifecycle(data)
+}
+
+// EXECUTION
+if(data?.observability?.execution_monitor){
+updateExecution(data)
+}
+
+// PNL + risk rule status (risk_status may arrive without pnl)
+if(data.pnl){
+updatePnL(data)
+}
+if(data.pnl || data.risk_status){
+updateRisk(data)
+}
+
+// PIPELINE
+updateExecutionPipeline(data)
+
+// HEADER MARKET DATA
+if(data.market){
+
+document.getElementById("mh-price").innerText =
+"Price: " + data.market.price
+
+document.getElementById("mh-change").innerText =
+"24h: " + data.market.change_24h + "%"
+
+document.getElementById("mh-funding").innerText =
+"Funding: " + data.market.funding
+
+}
+
+updateBacktestProgressDisplay(data)
+
+}
+}
+
+function updatePosition(data) {
+  const p = data?.position
+  const el = document.getElementById("position")
+  if (!el) return
+
+  if (!p || !p.side || p.side === "flat") {
+    el.innerHTML = `
+        <div class="v8-kv"><span class="k">Side</span><span class="v">FLAT</span></div>
+        <div class="v8-kv"><span class="k">Size</span><span class="v mono">0</span></div>
+        <div class="v8-kv"><span class="k">Entry Price</span><span class="v mono">—</span></div>
+    `
+    return
+  }
+
+  const side = String(p.side || "").toUpperCase()
+  const entry =
+    p.entry_price != null && !Number.isNaN(Number(p.entry_price))
+      ? Number(p.entry_price).toLocaleString(undefined, { maximumFractionDigits: 2 })
+      : "—"
+  const cls = side === "LONG" ? "pos-long" : side === "SHORT" ? "pos-short" : ""
+
+  el.innerHTML = `
+        <div class="v8-kv"><span class="k">Side</span><span class="v ${cls}">${side}</span></div>
+        <div class="v8-kv"><span class="k">Size</span><span class="v mono">${pnlFmtNum(p.size)}</span></div>
+        <div class="v8-kv"><span class="k">Entry Price</span><span class="v mono">${entry}</span></div>
+    `
+}
+
+function pnlFmtNum(v){
+if(v === null || v === undefined || Number.isNaN(Number(v))) return "—"
+return Number(v).toFixed(2)
+}
+
+function pnlFmtStr(v, fallback){
+if(v === null || v === undefined || v === "") return fallback ?? "—"
+return String(v)
+}
+
+function pnlFloatingStyle(raw){
+const n = Number(raw)
+if(Number.isNaN(n) || raw === null || raw === undefined) return "#9e9e9e"
+if(n > 0) return "#00c853"
+if(n < 0) return "#ff3d00"
+return "#9e9e9e"
+}
+
+function pnlFloatingPrefix(raw){
+const n = Number(raw)
+if(Number.isNaN(n) || raw === null || raw === undefined) return ""
+return n > 0 ? "+" : ""
+}
+
+function pnlModeLine(panel, root){
+if(root?.session_status === "no_session" || panel?.mode === "NONE"){
+return "No Active Session"
+}
+return pnlFmtStr(panel?.mode, "—")
+}
+
+function updateBacktestProgressDisplay(root) {
+  const el = document.getElementById("backtest_progress")
+  if (!el) return
+  const pnl = root?.pnl || {}
+  const prog =
+    root?.backtest_progress !== undefined ? root.backtest_progress : pnl.backtest_progress
+  const tc =
+    root?.trade_count !== undefined ? root.trade_count : pnl.trade_count
+  const eq = pnl.equity !== undefined && pnl.equity !== null ? pnl.equity : root?.equity
+
+  if (prog !== undefined && prog !== null && Number(prog) < 1) {
+    const pct = Math.round(Number(prog) * 100)
+    let s = `Backtest Running ${pct}%`
+    if (tc != null && tc !== "") s += ` · Trades: ${tc}`
+    if (eq != null && eq !== "" && !Number.isNaN(Number(eq))) s += ` · Equity: ${pnlFmtNum(eq)}`
+    el.innerText = s
+    return
+  }
+  if (prog !== undefined && prog !== null && Number(prog) >= 1) {
+    let s = "Backtest Finished"
+    if (tc != null && tc !== "") s += ` · Trades: ${tc}`
+    if (eq != null && eq !== "" && !Number.isNaN(Number(eq))) s += ` · Final Equity: ${pnlFmtNum(eq)}`
+    el.innerText = s
+    return
+  }
+  el.innerText = "Backtest Idle"
+}
+
+function pnlRenderOnePanel(panel, root){
+const modeLine = pnlModeLine(panel, root)
+const sym = pnlFmtStr(panel?.symbol, "—")
+const quote = pnlFmtStr(panel?.quote_asset, "—")
+const equity = pnlFmtNum(panel?.equity)
+const floatingRaw = panel?.floating
+const floating = pnlFmtNum(floatingRaw)
+const total = pnlFmtNum(panel?.total_equity)
+const fc = pnlFloatingStyle(floatingRaw)
+const fp = pnlFloatingPrefix(floatingRaw)
+return `
+Mode: ${modeLine}<br>
+Symbol: ${sym}<br>
+Quote Asset: ${quote}<br>
+Equity: ${equity}<br>
+Floating: <span style="color:${fc}">${fp}${floating}</span><br>
+Total Equity: ${total}<br>
+`
+}
+
+function updatePnL(data) {
+  const pnl = data?.pnl
+  const el = document.getElementById("pnl")
+  if (!pnl) {
+    updateBacktestProgressDisplay({ pnl: {} })
+    if (el) el.innerHTML = `<div class="v8-muted">No PnL data</div>`
+    return
+  }
+
+  const realized = Number(pnl.realized_pnl ?? 0).toFixed(2)
+  const drawdown = (Number(pnl.max_drawdown ?? 0) * 100).toFixed(2) + "%"
+  const pf = lastMetricsSummary?.profit_factor
+  const pfStr =
+    pf != null && !Number.isNaN(Number(pf)) ? Number(pf).toFixed(2) : "—"
+
+  const panels = Array.isArray(pnl.panels) ? pnl.panels : []
+  let equityStr = "—"
+  let floatingHtml = ""
+  let totalEq = null
+
+  if (panels.length === 0) {
+    equityStr = pnlFmtNum(pnl.equity)
+    const fp = pnlFloatingPrefix(pnl.floating_pnl)
+    const fc = pnlFloatingStyle(pnl.floating_pnl)
+    floatingHtml = `<span class="v8-floating" style="color:${fc}">${fp}${pnlFmtNum(pnl.floating_pnl)}</span>`
+    totalEq = pnl.total_equity != null ? Number(pnl.total_equity) : null
+  } else if (panels.length === 1) {
+    const p0 = panels[0]
+    equityStr = pnlFmtNum(p0?.equity)
+    const fp = pnlFloatingPrefix(p0?.floating)
+    const fc = pnlFloatingStyle(p0?.floating)
+    floatingHtml = `<span class="v8-floating" style="color:${fc}">${fp}${pnlFmtNum(p0?.floating)}</span>`
+    totalEq = p0?.total_equity != null ? Number(p0.total_equity) : null
+  } else {
+    equityStr = `${panels.length} sessions`
+    floatingHtml = ""
+  }
+
+  if (el) {
+    el.innerHTML = `
+        <div class="v8-kv"><span class="k">Equity</span><span class="v mono">${equityStr}</span>${
+          floatingHtml ? ` <span class="v8-sub">${floatingHtml} floating</span>` : ""
+        }</div>
+        <div class="v8-kv"><span class="k">Realized PnL</span><span class="v mono">${realized}</span></div>
+        <div class="v8-kv"><span class="k">Drawdown</span><span class="v mono">${drawdown}</span></div>
+        <div class="v8-kv"><span class="k">Profit Factor</span><span class="v mono">${pfStr}</span></div>
+    `
+  }
+
+  if (pnl.session_status === "single" && totalEq != null && !Number.isNaN(totalEq)) {
+    equityHistory.push(totalEq)
+  }
+
+  if (equityHistory.length > 50) {
+    equityHistory.shift()
+  }
+
+  updateEquityChart()
+  updateBacktestProgressDisplay({ pnl })
+}
+
+function updateMetrics(data) {
+  const el = document.getElementById("metrics")
+  if (!el) return
+  const m = lastMetricsSummary || data?.metrics
+  if (!m) {
+    el.innerHTML = `<div class="v8-muted">—</div>`
+    return
+  }
+  const wr = m.win_rate != null ? (Number(m.win_rate) * 100).toFixed(1) : "—"
+  el.innerHTML = `
+        <div class="v8-kv"><span class="k">Trades</span><span class="v mono">${m.total_trades ?? "—"}</span></div>
+        <div class="v8-kv"><span class="k">Win rate</span><span class="v mono">${wr}%</span></div>
+        <div class="v8-kv"><span class="k">Avg win</span><span class="v mono">${m.avg_win ?? "—"}</span></div>
+    `
+}
+
+async function updateTrades() {
+  const table = document.querySelector("#trades tbody")
+  if (!table) return
+
+  const root = document.getElementById("trades")
+  const compact = root?.classList?.contains("v8-compact-history")
+
+  try {
+    const requestId = ++tradesRequestId
+
+    const res = await fetch(`/api/trades/history?${getTradeHistoryQueryParams()}`)
+    const data = await res.json()
+    if (requestId !== tradesRequestId) return
+
+    table.innerHTML = ""
+
+    if (!data.history) return
+
+    data.history.forEach((t) => {
+      const time = new Date(t.time * 1000)
+      const timeStr = compact
+        ? time.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
+        : time.toLocaleString()
+
+      const side = t.side ?? "-"
+      const size = t.size ?? "-"
+      const entry = t.entry ?? "-"
+      const exit = t.exit ?? "-"
+      const pnl = t.pnl ?? 0
+      const fees = Number(t.fees ?? t.fee ?? 0).toFixed(3)
+
+      const sideColor = side === "LONG" ? "#22c55e" : "#ef4444"
+      const pnlColor = pnl >= 0 ? "#22c55e" : "#ef4444"
+
+      const row = document.createElement("tr")
+
+      if (compact) {
+        const px = t.exit ?? t.entry ?? "-"
+        row.innerHTML = `
+<td class="mono">${timeStr}</td>
+<td style="color:${sideColor}">${side}</td>
+<td class="mono">${px}</td>
+<td style="color:${pnlColor}" class="mono">${pnl}</td>
+`
+      } else {
+        row.innerHTML = `
+<td>${timeStr}</td>
+<td>${t.mode ?? "-"}</td>
+<td>${t.symbol ?? "-"}</td>
+<td>${t.strategy ?? "-"}</td>
+<td style="color:${sideColor}">${side}</td>
+<td>${size}</td>
+<td>${entry}</td>
+<td>${exit}</td>
+<td style="color:${pnlColor}">${pnl}</td>
+<td>${fees}</td>
+<td>${t.asset || "USDT"}</td>
+`
+      }
+
+      table.appendChild(row)
+    })
+  } catch (e) {
+    console.log("trade history error", e)
+  }
+}
+
+function updateEquityChart(){
+
+const labels = equityHistory.map((_,i)=>i+1);
+
+const ctx = document.getElementById("equityChart");
+
+if(!equityChart){
+
+equityChart = new Chart(ctx,{
+type:"line",
+data:{
+labels:labels,
+datasets:[{
+label:"Equity",
+data:equityHistory,
+borderColor:"#22c55e",
+fill:false
+}]
+},
+options:{
+responsive:true,
+maintainAspectRatio:false,
+plugins:{
+legend:{
+display:false
+}
+}
+}
+});
+
+}else{
+
+equityChart.data.labels = labels;
+equityChart.data.datasets[0].data = equityHistory;
+equityChart.update();
+
+}
+
+}
+
+function updateSystem(data) {
+  const sec = Math.floor((Date.now() - v8AppStartMs) / 1000)
+  const h = Math.floor(sec / 3600)
+  const m = Math.floor((sec % 3600) / 60)
+  const uptimeStr = `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}`
+
+  const uptimeHdr = document.getElementById("mh-uptime")
+  if (uptimeHdr) uptimeHdr.innerText = `Uptime: ${uptimeStr}`
+
+  const el = document.getElementById("system")
+  if (el) {
+    let cpu = "—"
+    let mem = "—"
+    if (data.system) {
+      cpu = `${Number(data.system.cpu).toFixed(0)}%`
+      const mp = data.system.mem_percent
+      mem =
+        mp != null && !Number.isNaN(Number(mp))
+          ? `${Number(mp).toFixed(0)}%`
+          : `${Number(data.system.mem_mb).toFixed(0)} MB`
+    }
+    el.innerHTML = `
+        <div class="v8-kv"><span class="k">CPU</span><span class="v mono">${cpu}</span></div>
+        <div class="v8-kv"><span class="k">Memory</span><span class="v mono">${mem}</span></div>
+        <div class="v8-kv"><span class="k">Uptime</span><span class="v mono">${uptimeStr}</span></div>
+    `
+  }
+
+  if (data.system) {
+    const cpuEl = document.getElementById("mh-cpu")
+    const memEl = document.getElementById("mh-mem")
+    if (cpuEl) cpuEl.innerText = "CPU: " + Number(data.system.cpu).toFixed(0) + "%"
+    if (memEl) {
+      const mp = data.system.mem_percent
+      memEl.innerText =
+        mp != null && !Number.isNaN(Number(mp))
+          ? "MEM: " + Number(mp).toFixed(0) + "%"
+          : "MEM: " + data.system.mem_mb.toFixed(1) + " MB"
+    }
+  }
+}
+
+function updateExecution(data) {
+  const exec = data?.observability?.execution_monitor
+  const pos = data?.position
+  const rt = Array.isArray(data?.recent_trades) ? data.recent_trades : []
+  const last = rt.length ? rt[0] : null
+  const el = document.getElementById("execution")
+  if (!el) return
+
+  let state = "IDLE"
+  let lastOrder = "—"
+  let latency = "—"
+
+  if (exec) {
+    if (exec.fill_price) state = "ORDER FILLED"
+    else if (exec.signal_price) state = "SIGNAL"
+    const lat = exec.total_latency_ms
+    if (lat != null && !Number.isNaN(Number(lat))) latency = `${Math.round(Number(lat))} ms`
+  }
+
+  if (last) {
+    const side = (last.side || "").toUpperCase()
+    const px = last.exit ?? last.entry ?? last.fill_price ?? "—"
+    lastOrder = `${side} @ ${px}`
+  }
+
+  const idle = !exec && (!pos || !pos.side || pos.side === "flat") && !last
+  if (idle) {
+    el.innerHTML = `
+    <div class="v8-kv"><span class="k">State</span><span class="v state-idle">IDLE</span></div>
+    <div class="v8-kv"><span class="k">Last Order</span><span class="v mono">—</span></div>
+    <div class="v8-kv"><span class="k">Execution Latency</span><span class="v mono">—</span></div>
+`
+    return
+  }
+
+  el.innerHTML = `
+    <div class="v8-kv"><span class="k">State</span><span class="v state-hot">${state}</span></div>
+    <div class="v8-kv"><span class="k">Last Order</span><span class="v mono">${lastOrder}</span></div>
+    <div class="v8-kv"><span class="k">Execution Latency</span><span class="v mono">${latency}</span></div>
+`
+}
+
+function updateExecutionTimeline(data){
+
+    const pos = data.position;
+
+    let signal = "NONE";
+    let decision = "NONE";
+    let order = "IDLE";
+    let fill = "--";
+
+    if(pos.side === "LONG"){
+        signal = "LONG";
+        decision = "OPEN LONG";
+        order = "FILLED";
+    }
+
+    if(pos.side === "SHORT"){
+        signal = "SHORT";
+        decision = "OPEN SHORT";
+        order = "FILLED";
+    }
+
+    document.getElementById("execution_timeline").innerHTML = `
+    Signal: ${signal}<br>
+    Decision: ${decision}<br>
+    Order: ${order}<br>
+    Exchange: ACK<br>
+    Fill: ${pos.size}
+    `;
+
+}
+
+function riskFmt(v){
+if(v === null || v === undefined) return "—"
+if(typeof v === "boolean") return v ? "yes" : "no"
+if(typeof v === "number" && Number.isFinite(v)) return String(v)
+return String(v)
+}
+
+function updateRisk(data){
+
+const rs = data?.risk_status
+const pnl = data?.pnl
+
+if(!rs && !pnl) return
+
+let html = ""
+
+if(rs){
+const allowed = rs.trade_allowed === true
+const blocked = Array.isArray(rs.blocked_rules) && rs.blocked_rules.length
+? rs.blocked_rules.join(", ")
+: "—"
+
+html += `<b>Trade allowed:</b> ${allowed ? "yes" : "no"}<br>`
+html += `<b>Blocked rules:</b> ${blocked}<br>`
+
+if(rs.readonly_state){
+html += `<b>Control state:</b> ${riskFmt(rs.readonly_state)}<br>`
+}
+
+const der = rs.daily_equity_risk
+if(der && typeof der === "object" && Object.keys(der).length){
+html += `<br><b>Daily start equity:</b> ${riskFmt(der.daily_start_equity)}<br>`
+html += `<b>Current equity:</b> ${riskFmt(der.current_equity)}<br>`
+html += `<b>Daily drawdown:</b> ${
+der.daily_drawdown_pct === null || der.daily_drawdown_pct === undefined
+? "—"
+: der.daily_drawdown_pct + "%"
+}<br>`
+html += `<b>Daily limit:</b> ${riskFmt(der.daily_limit_pct)}%<br><br>`
+}
+
+const ord = [
+"consecutive_loss",
+"daily_loss_limit",
+"cooldown",
+"max_drawdown"
+]
+
+const rules = rs.rules || {}
+for(const key of ord){
+const rule = rules[key]
+if(!rule) continue
+const st = riskFmt(rule.status)
+let detail = ""
+if(key === "consecutive_loss"){
+detail = `streak ${riskFmt(rule.loss_streak)} / limit ${riskFmt(rule.limit)}`
+}else if(key === "daily_loss_limit"){
+detail = `daily ${riskFmt(rule.daily_loss)} / max ${riskFmt(rule.max_daily_loss)}`
+}else if(key === "cooldown"){
+const rem = rule.remaining_time
+detail = rule.cooldown_active
+? `remaining ${riskFmt(rem)}s`
+: "—"
+}else if(key === "max_drawdown"){
+if(rule.active){
+detail = `start ${riskFmt(rule.daily_start_equity)} / curr ${riskFmt(rule.current_equity)} / dd ${riskFmt(rule.daily_drawdown_pct)}% / limit ${riskFmt(rule.max_drawdown)}%`
+}else{
+detail = "inactive until first trade (UTC day)"
+}
+}
+html += `<br><b>${key}</b> (${st})<br>${detail}<br>`
+}
+html += "<br>"
+}
+
+if(pnl){
+const drawdown = (Number(pnl.max_drawdown ?? 0) * 100).toFixed(2) + "%"
+const realized = Number(pnl.realized_pnl ?? 0).toFixed(2)
+html += `<b>Journal drawdown:</b> ${drawdown}<br>`
+html += `<b>Realized PnL:</b> ${realized}<br>`
+}
+
+document.getElementById("risk").innerHTML = html
+}
+
+function updateSystemMonitor(data){
+
+    const ts = new Date(data.timestamp * 1000).toLocaleTimeString();
+
+    document.getElementById("system_monitor").innerHTML = `
+    Last heartbeat: ${ts}<br>
+    API: OK
+    `;
+
+}
+
+function updateStrategy(data) {
+  const pos = data?.position
+  const bias = data?.market_bias || {}
+  const el = document.getElementById("strategy")
+  if (!el) return
+
+  const stratRaw = String(bias.strategy_bias || "")
+  const mkt = String(bias.market_bias || "—")
+  let direction = "—"
+  if (pos && pos.side && pos.side !== "flat") {
+    direction = String(pos.side).toUpperCase()
+  } else if (stratRaw) {
+    const u = stratRaw.toUpperCase()
+    direction = u.includes("BULL") ? "LONG" : u.includes("BEAR") ? "SHORT" : stratRaw
+  }
+
+  const confidence = "—"
+
+  el.innerHTML = `
+    <div class="v8-kv"><span class="k">Direction</span><span class="v">${direction}</span></div>
+    <div class="v8-kv"><span class="k">Confidence</span><span class="v mono">${confidence}</span></div>
+    <div class="v8-kv"><span class="k">Trend</span><span class="v">${mkt || "—"}</span></div>
+`
+}
+
+function updatePerformance(data) {
+  const el = document.getElementById("performance")
+  if (!el) return
+  const m = lastMetricsSummary || data?.metrics
+  const pnl = data?.pnl || {}
+  const mdd = (Number(pnl.max_drawdown ?? 0) * 100).toFixed(2) + "%"
+  if (!m) {
+    el.innerHTML = `<div class="v8-muted">—</div>`
+    return
+  }
+  el.innerHTML = `
+    <div class="v8-kv"><span class="k">Profit factor</span><span class="v mono">${
+      m.profit_factor != null ? Number(m.profit_factor).toFixed(2) : "—"
+    }</span></div>
+    <div class="v8-kv"><span class="k">Max drawdown</span><span class="v mono">${mdd}</span></div>
+    `
+}
+
+function updateReconciliation(data) {
+  const el = document.getElementById("reconciliation")
+  if (!el) return
+  const pos = data.position || { side: "flat", size: 0 }
+  const botPos = `${String(pos.side || "flat").toUpperCase()} ${pos.size ?? 0}`
+  const exchangePos = botPos
+  el.innerHTML = `
+    <div class="v8-kv"><span class="k">Bot position</span><span class="v mono">${botPos}</span></div>
+    <div class="v8-kv"><span class="k">Exchange position</span><span class="v mono">${exchangePos}</span></div>
+    <div class="v8-kv"><span class="k">Status</span><span class="v ok">OK</span></div>
+    `
+}
+
+function updateSlippage(data) {
+  const el = document.getElementById("slippage")
+  if (!el) return
+  if (!data.observability || !data.observability.execution_monitor) {
+    el.innerHTML = `
+    <div class="v8-kv"><span class="k">Signal price</span><span class="v mono">—</span></div>
+    <div class="v8-kv"><span class="k">Fill price</span><span class="v mono">—</span></div>
+    <div class="v8-kv"><span class="k">Slippage</span><span class="v mono">—</span></div>
+    `
+    return
+  }
+  const exec = data.observability.execution_monitor
+  el.innerHTML = `
+    <div class="v8-kv"><span class="k">Signal price</span><span class="v mono">${exec.signal_price ?? "—"}</span></div>
+    <div class="v8-kv"><span class="k">Fill price</span><span class="v mono">${exec.fill_price ?? "—"}</span></div>
+    <div class="v8-kv"><span class="k">Slippage</span><span class="v mono">${exec.slippage ?? "—"}</span></div>
+    `
+}
+
+function updateLatency(data) {
+  const el = document.getElementById("latency")
+  if (!el) return
+  const fmt = (v) =>
+    v != null && !Number.isNaN(Number(v)) ? `${Number(v).toFixed(0)} ms` : "—"
+  if (!data.observability || !data.observability.execution_monitor) {
+    el.innerHTML = `
+    <div class="v8-kv"><span class="k">Signal latency</span><span class="v mono">—</span></div>
+    <div class="v8-kv"><span class="k">Order latency</span><span class="v mono">—</span></div>
+    <div class="v8-kv"><span class="k">Execution latency</span><span class="v mono">—</span></div>
+    `
+    return
+  }
+  const exec = data.observability.execution_monitor
+  el.innerHTML = `
+    <div class="v8-kv"><span class="k">Signal latency</span><span class="v mono">${fmt(exec.signal_latency_ms)}</span></div>
+    <div class="v8-kv"><span class="k">Order latency</span><span class="v mono">${fmt(exec.exchange_latency_ms)}</span></div>
+    <div class="v8-kv"><span class="k">Execution latency</span><span class="v mono">${fmt(exec.total_latency_ms)}</span></div>
+    `
+}
+
+function updateAlerts(data) {
+  const el = document.getElementById("alerts")
+  if (!el) return
+  const alerts = []
+  const exec = data?.observability?.execution_monitor
+  if (exec && exec.signal_price != null && exec.fill_price != null) {
+    const sp = Number(exec.signal_price)
+    const fp = Number(exec.fill_price)
+    if (Number.isFinite(sp) && Number.isFinite(fp) && sp > 0) {
+      const driftPct = (Math.abs(fp - sp) / sp) * 100
+      if (driftPct > 0.05) alerts.push("EXECUTION DRIFT DETECTED")
+    }
+  }
+  const pos = data?.position
+  if (pos && Number(pos.size) > 5) alerts.push("Position size unusually large")
+  if (data?.pnl && Number(data.pnl.max_drawdown) > 0.1) alerts.push("Drawdown exceeded threshold")
+  if (!alerts.length) alerts.push("No active alerts")
+  el.innerHTML = `<div class="v8-alert-stack">${alerts.map((a) => `<div class="v8-alert-line">${a}</div>`).join("")}</div>`
+}
+
+async function loadSymbols(){
+
+try{
+
+const res = await fetch("/api/symbols")
+
+if(!res.ok) return
+
+const symbols = await res.json()
+
+const select = document.getElementById("symbol_select")
+
+select.innerHTML=""
+
+symbols.forEach(s=>{
+
+const opt=document.createElement("option")
+opt.value=s
+opt.innerText=s
+
+select.appendChild(opt)
+
+})
+
+}catch(e){
+
+console.log("symbol load error",e)
+
+}
+
+applySymbolSelectFromBaseline()
+
+}
+
+function filterSymbols(){
+
+const filter = document
+.getElementById("symbol_filter")
+.value.toUpperCase()
+
+const select = document.getElementById("symbol_select")
+
+let firstVisible = null
+
+Array.from(select.options).forEach(opt=>{
+
+if(opt.value.includes(filter)){
+opt.style.display=""
+if(!firstVisible) firstVisible = opt
+}else{
+opt.style.display="none"
+}
+
+})
+
+// auto select first match
+if(firstVisible){
+select.value = firstVisible.value
+}
+
+}
+
+
+function initMarketWS(){
+
+const ws = new WebSocket("ws://127.0.0.1:8000/ws/state/live_shadow")
+
+ws.onmessage = (event)=>{
+
+const data = JSON.parse(event.data)
+
+console.log("WS MARKET DATA:", data)
+
+if(data.price){
+
+document.getElementById("mh-price").innerText =
+"Price: " + data.price
+
+}
+
+if(data.change_24h){
+
+document.getElementById("mh-change").innerText =
+"24h: " + data.change_24h + "%"
+
+}
+
+if(data.funding){
+
+document.getElementById("mh-funding").innerText =
+"Funding: " + data.funding
+
+}
+
+}
+
+}
+
+async function loadMarket(){
+
+try{
+
+const res = await fetch("/api/system/market")
+const data = await res.json()
+
+const priceEl = document.getElementById("mh-price")
+const changeEl = document.getElementById("mh-change")
+const fundingEl = document.getElementById("mh-funding")
+
+priceEl.innerText = "Price: " + data.price
+changeEl.innerText = "24h: " + data.change_24h + "%"
+fundingEl.innerText = "Funding: " + data.funding
+
+// màu 24h
+if(data.change_24h >= 0){
+changeEl.style.color = "#22c55e"
+}else{
+changeEl.style.color = "#ef4444"
+}
+
+// màu funding
+if(data.funding >= 0){
+fundingEl.style.color = "#22c55e"
+}else{
+fundingEl.style.color = "#ef4444"
+}
+priceEl.style.color = "#38bdf8"
+
+setTimeout(()=>{
+priceEl.style.color = "#e2e8f0"
+},300)
+
+}catch(e){
+
+console.log(e)
+
+}
+
+}
+
+function renderExecutionPipeline() {
+  const container = document.getElementById("execution_pipeline")
+  if (!container) return
+  container.innerHTML = `
+<div class="v8-pipeline-track">
+<div id="p_signal" class="pipeline-step" data-step="signal">Signal</div>
+<div class="pipeline-arrow">→</div>
+<div id="p_decision" class="pipeline-step" data-step="decision">Decision</div>
+<div class="pipeline-arrow">→</div>
+<div id="p_order" class="pipeline-step" data-step="order">Order</div>
+<div class="pipeline-arrow">→</div>
+<div id="p_exchange" class="pipeline-step" data-step="exchange">Exchange</div>
+<div class="pipeline-arrow">→</div>
+<div id="p_fill" class="pipeline-step" data-step="fill">Fill</div>
+</div>
+`
+}
+
+function updateExecutionPipeline(data) {
+  const selectedStatus = sessionRuntimeStatus[selectedDashboardSession] || "UNKNOWN"
+  const steps = ["signal", "decision", "order", "exchange", "fill"]
+  const meta = document.getElementById("v8_pipeline_meta")
+
+  if (!dualPanelModeEnabled && selectedStatus !== "RUNNING") {
+    steps.forEach((s) => {
+      const el = document.getElementById("p_" + s)
+      if (!el) return
+      el.classList.remove("active", "done")
+    })
+    if (meta) meta.textContent = "Session not running — pipeline idle"
+    return
+  }
+
+  let stage = "signal"
+  if (data.position?.side && data.position.side !== "flat") {
+    stage = "fill"
+  } else if (data.recent_trades && data.recent_trades.length > 0) {
+    stage = "fill"
+  } else if (data?.observability?.execution_monitor?.fill_price) {
+    stage = "fill"
+  } else if (data?.observability?.execution_monitor?.signal_price) {
+    stage = "decision"
+  }
+
+  steps.forEach((s) => {
+    const el = document.getElementById("p_" + s)
+    if (!el) return
+    el.classList.remove("active", "done")
+  })
+
+  let done = true
+  steps.forEach((s) => {
+    const el = document.getElementById("p_" + s)
+    if (!el) return
+    if (done) el.classList.add("done")
+    if (s === stage) {
+      el.classList.remove("done")
+      el.classList.add("active")
+      done = false
+    }
+  })
+
+  const exec = data?.observability?.execution_monitor
+  const lat = exec?.total_latency_ms
+  if (meta) {
+    meta.textContent = `Current step: ${stage} · Latency: ${
+      lat != null && !Number.isNaN(Number(lat)) ? Math.round(Number(lat)) + " ms" : "—"
+    }`
+  }
+}
+
+function updateV8PipelineBreadcrumb(_data) {
+  const el = document.getElementById("v8_flow_breadcrumb")
+  if (!el) return
+  el.textContent = "Signal → Decision → Order → Exchange → Fill"
+}
+
+async function updateExecutionHistory(){
+
+try{
+const requestId = ++executionHistoryRequestId
+
+const res = await fetch(`/api/execution/history?${getExecutionHistoryQueryParams()}`)
+
+if(!res.ok) return
+
+const data = await res.json()
+if(requestId !== executionHistoryRequestId) return
+
+const table = document.querySelector("#execution_history_table tbody")
+
+if(!table) return
+
+table.innerHTML=""
+
+if(!data.history) return
+
+const rows = data.history.slice(0,50)
+rows.forEach(t => {
+
+const time = new Date(t.time * 1000).toLocaleString()
+
+const row = document.createElement("tr")
+
+const sideColor =
+t.side === "LONG"
+? "#22c55e"
+: t.side === "SHORT"
+? "#ef4444"
+: "#e2e8f0"
+
+row.innerHTML=`
+
+<td>${time}</td>
+<td>${t.mode ?? "-"}</td>
+<td>${t.symbol ?? "-"}</td>
+<td>${t.strategy ?? "-"}</td>
+<td style="color:${sideColor}">${t.side}</td>
+<td>${t.size ?? "-"}</td>
+<td>${t.fill_price ?? "-"}</td>
+<td>${t.fee != null && t.fee !== "" ? t.fee : "-"}</td>
+<td>${t.slippage ?? "-"}</td>
+<td>${t.latency ?? "-"} ms</td>
+
+`
+
+table.appendChild(row)
+
+})
+
+}catch(e){
+
+console.log("execution history error",e)
+
+}
+
+}
+
+function updateOrderLifecycle(data){
+
+const el = document.getElementById("order_lifecycle")
+if(!el) return
+
+const pos = data?.position
+
+if(!pos){
+el.innerHTML = `
+State: IDLE<br>
+Side: flat<br>
+Size: 0
+`
+return
+}
+
+let state = "IDLE"
+
+if(pos.side === "LONG") state = "LONG OPENED"
+if(pos.side === "SHORT") state = "SHORT OPENED"
+
+el.innerHTML = `
+State: ${state}<br>
+Side: ${pos.side}<br>
+Size: ${pos.size}
+`
+}
+
+async function setExchange(btn){
+
+const exchange =
+document.getElementById("exchange_select").value
+
+try{
+
+await fetch(`/api/control/exchange${controlPanelSessionQuery()}`,{
+method:"POST",
+headers:{
+"Content-Type":"application/json"
+},
+body:JSON.stringify({exchange})
+})
+
+markControlApplyCommitted("exchange_select", exchange)
+
+flashButton(btn)
+
+}catch(e){
+
+console.error(e)
+
+}
+
+}
+
+function updateMarketBias(data) {
+  const host = document.getElementById("market_bias")
+  if (!host) return
+
+const bias = data?.market_bias
+
+if(!bias){
+
+host.innerHTML = `
+Market: -<br>
+Strategy: -<br>
+Execution: -
+`
+return
+}
+
+const market = bias.market_bias || "-"
+const strategy = bias.strategy_bias || "-"
+const execution = bias.execution_bias || "-"
+
+// color logic
+function color(v){
+
+if(v.includes("BULL")) return "#22c55e"
+if(v.includes("BEAR")) return "#ef4444"
+
+return "#e2e8f0"
+
+}
+
+host.innerHTML = `
+
+Market:
+<span style="color:${color(market)}">
+${market}
+</span>
+<br>
+
+Strategy:
+<span style="color:${color(strategy)}">
+${strategy}
+</span>
+<br>
+
+Execution:
+<span style="color:${color(execution)}">
+${execution}
+</span>
+
+`
+
+}
+
+async function setRisk(btn){
+
+const display = document.getElementById("risk_input").value
+const fraction = riskPercentInputToFraction(display)
+
+if(!Number.isFinite(fraction) || fraction <= 0){
+console.error("Invalid risk: enter a positive percent (e.g. 1 for 1%)")
+return
+}
+
+try{
+
+await fetch(`/api/control/risk${controlPanelSessionQuery()}`,{
+method:"POST",
+headers:{
+"Content-Type":"application/json"
+},
+body:JSON.stringify({risk:fraction})
+})
+await syncSessionConfigAfterControl()
+
+markControlApplyCommitted("risk_input", display)
+
+flashButton(btn)
+
+}catch(e){
+
+console.error(e)
+
+}
+
+}
+
+
+async function setMode(btn){
+
+const mode = document.getElementById("trade_mode_select").value
+
+try{
+
+await fetch("/api/control/trade_mode",{
+method:"POST",
+headers:{
+"Content-Type":"application/json"
+},
+body:JSON.stringify({mode})
+})
+await syncSessionConfigAfterControl()
+
+markControlApplyCommitted("trade_mode_select", mode)
+
+flashButton(btn)
+
+}catch(e){
+
+console.error(e)
+
+}
+
+}
+
+
+async function setTradingMode(btn){
+
+const mode = document.getElementById("trading_mode_select").value
+
+try{
+
+await fetch("/api/control/mode",{
+method:"POST",
+headers:{
+"Content-Type":"application/json"
+},
+body:JSON.stringify({mode})
+})
+
+markControlApplyCommitted("trading_mode_select", mode)
+
+flashButton(btn)
+
+}catch(e){
+
+console.error(e)
+
+}
+
+}
+
+
+async function setStrategy(btn){
+
+const strategy = document.getElementById("strategy_select").value
+
+try{
+
+await fetch(`/api/control/strategy${controlPanelSessionQuery()}`,{
+method:"POST",
+headers:{
+"Content-Type":"application/json"
+},
+body:JSON.stringify({strategy})
+})
+await syncSessionConfigAfterControl()
+
+markControlApplyCommitted("strategy_select", strategy)
+
+flashButton(btn)
+
+}catch(e){
+
+console.error(e)
+
+}
+
+}
+
+
+async function setSymbol(btn){
+
+const symbol = document.getElementById("symbol_select").value
+
+try{
+
+await fetch(`/api/control/symbol${controlPanelSessionQuery()}`,{
+method:"POST",
+headers:{
+"Content-Type":"application/json"
+},
+body:JSON.stringify({symbol})
+})
+
+markControlApplyCommitted("symbol_select", symbol)
+
+flashButton(btn)
+
+}catch(e){
+
+console.error(e)
+
+}
+
+}
+
+function flashButton(button){
+
+const row = button.closest(".control-row")
+
+if(row){
+row.querySelectorAll("button").forEach(btn=>{
+btn.style.backgroundColor = ""
+btn.style.color = ""
+})
+}
+
+button.style.backgroundColor = "#22c55e"
+button.style.color = "#000"
+
+}
+
+function pendingButton(selectId){
+
+const select = document.getElementById(selectId)
+
+if(!select) return
+
+const button = select
+.closest(".control-row")
+.querySelector("button")
+
+if(!button) return
+
+if(!controlPanelBaselineReady){
+button.style.backgroundColor = ""
+button.style.color = ""
+return
+}
+
+const last = lastAppliedControlValues[selectId]
+const current = String(select.value)
+
+if(last !== undefined && current !== last){
+
+button.style.backgroundColor = "#3b82f6"
+button.style.color = "#fff"
+
+}else{
+
+button.style.backgroundColor = ""
+button.style.color = ""
+
+}
+
+}
