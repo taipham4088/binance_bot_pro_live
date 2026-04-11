@@ -1,9 +1,0 @@
-{
-  "trading_enabled": true,
-  "exchange": "binance",
-  "symbol": "BTCUSDT",
-  "mode": "live",
-  "risk_percent": 0.01,
-  "trade_mode": "long",
-  "strategy": "range_trend"
-}

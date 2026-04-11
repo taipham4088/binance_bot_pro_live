@@ -6,6 +6,12 @@ from pydantic import BaseModel
 from trading_core.config.engine_config import EngineConfig
 
 from backend.runtime.runtime_config import runtime_config
+from backend.runtime.session_config_store import (
+    apply_stored_to_trading_session,
+    ensure_engine_config as _ensure_engine_config,
+    load_control_config_merged,
+    save_control_config_merge,
+)
 from backend.core.trading_session import canonical_session_id, mode_defers_execution_bootstrap
 from backend.services.paper_service import PaperService
 from backend.services.backtest_service import BacktestService
@@ -74,33 +80,6 @@ def _get_session_for_control(manager, payload: dict):
     return session
 
 
-def _ensure_engine_config(session) -> None:
-    """Paper/Backtest services need EngineConfig-style attributes (not a plain dict)."""
-    if isinstance(session.config, EngineConfig):
-        return
-    if not isinstance(session.config, dict):
-        session.config = EngineConfig(
-            initial_balance=10000.0,
-            risk_per_trade=float(runtime_config.get("risk_percent", 0.01) or 0.01),
-            symbol=str(runtime_config.get("symbol") or "BTCUSDT"),
-            exchange=str(runtime_config.get("exchange") or "binance"),
-            mode=str(getattr(session, "mode", None) or "paper"),
-            trade_mode=str(runtime_config.get("trade_mode") or "dual"),
-        )
-        return
-    d = session.config
-    session.config = EngineConfig(
-        initial_balance=float(d.get("initial_balance", 10000)),
-        risk_per_trade=float(
-            d.get("risk_per_trade", runtime_config.get("risk_percent", 0.01) or 0.01)
-        ),
-        symbol=str(d.get("symbol") or runtime_config.get("symbol") or "BTCUSDT"),
-        exchange=str(d.get("exchange") or runtime_config.get("exchange") or "binance"),
-        mode=str(d.get("mode") or getattr(session, "mode", None) or "paper"),
-        trade_mode=str(d.get("trade_mode") or runtime_config.get("trade_mode") or "dual"),
-    )
-
-
 def _set_session_initial_balance(session, value: float) -> None:
     c = session.config
     if isinstance(c, dict):
@@ -155,12 +134,13 @@ async def create_session(req: Request, payload: CreateSessionRequest):
     if effective_mode in ("paper", "backtest"):
         defer = True
 
+    stored = load_control_config_merged(sid)
     config = {
         "symbol": sym,
-        "engine": payload.engine or runtime_config.get("strategy", "range_trend"),
-        "risk_per_trade": runtime_config.get("risk_percent", 0.01),
-        "trade_mode": runtime_config.get("trade_mode", "dual"),
-        "initial_balance": runtime_config.get("initial_balance", 10000),
+        "engine": payload.engine or stored.get("strategy", "range_trend"),
+        "risk_per_trade": float(stored.get("risk_percent", 0.01)),
+        "trade_mode": str(stored.get("trade_mode", "dual")),
+        "initial_balance": float(stored.get("initial_balance", 10000)),
     }
     print("[SESSION CREATE CONFIG]")
     print("mode =", effective_mode)
@@ -200,6 +180,17 @@ async def list_sessions(req: Request):
     return result
 
 
+def _public_control_config_from_stored(stored: dict) -> dict:
+    return {
+        "trade_mode": str(stored.get("trade_mode") or "dual"),
+        "risk_percent": float(stored.get("risk_percent") or 0.01),
+        "initial_balance": float(stored.get("initial_balance") or 10000),
+        "strategy": str(stored.get("strategy") or "range_trend"),
+        "symbol": str(stored.get("symbol") or "BTCUSDT"),
+        "exchange": str(stored.get("exchange") or "binance"),
+    }
+
+
 def _public_control_config_from_session(session) -> dict:
     """Control-panel fields for dashboard; supports dict or EngineConfig on session.config."""
     c = session.config
@@ -225,12 +216,9 @@ def _public_control_config_from_session(session) -> dict:
 
 @router.get("/config")
 async def get_session_config(req: Request, session: str = Query(..., description="Session id, e.g. live, backtest")):
-    manager = req.app.state.manager
     sid = canonical_session_id(session)
-    sess = manager.get(sid)
-    if not sess:
-        return {"error": "session not found"}
-    return _public_control_config_from_session(sess)
+    stored = load_control_config_merged(sid)
+    return _public_control_config_from_stored(stored)
 
 
 @router.post("/config")
@@ -242,30 +230,32 @@ async def update_session_config(
     manager = req.app.state.manager
     sid = canonical_session_id(session)
     sess = manager.get(sid)
-    if not sess:
-        return {"error": "session not found"}
 
-    _ensure_engine_config(sess)
+    updates = {}
+    if "initial_balance" in payload:
+        updates["initial_balance"] = payload["initial_balance"]
+    if "trade_mode" in payload:
+        updates["trade_mode"] = payload["trade_mode"]
+    if "risk_percent" in payload:
+        updates["risk_percent"] = payload["risk_percent"]
+    if "strategy" in payload:
+        updates["strategy"] = payload["strategy"]
+
+    merged = save_control_config_merge(sid, updates)
 
     print("[CONTROL PANEL APPLY]")
     print("payload =", payload)
-    print("session =", sess.id)
-    print("config_before =", sess.config)
+    print("session_id =", sid)
+    if sess:
+        print("config_before =", sess.config)
 
-    if "initial_balance" in payload:
-        sess.config.initial_balance = payload["initial_balance"]
-
-    if "trade_mode" in payload:
-        sess.config.trade_mode = payload["trade_mode"]
-
-    if "risk_percent" in payload:
-        sess.config.risk_per_trade = payload["risk_percent"]
-
-    if "strategy" in payload:
-        sess.config.engine = payload["strategy"]
+    if sess:
+        _ensure_engine_config(sess)
+        apply_stored_to_trading_session(sess, merged)
 
     print("[CONTROL PANEL UPDATED]")
-    print("config_after =", sess.config)
+    if sess:
+        print("config_after =", sess.config)
     return {"status": "updated"}
 
 
@@ -311,14 +301,8 @@ async def session_control_start(req: Request, payload: dict = Body(...)):
     manager = req.app.state.manager
     session = _get_session_for_control(manager, payload)
     _ensure_engine_config(session)
-    if hasattr(session.config, "trade_mode"):
-        session.config.trade_mode = runtime_config.get("trade_mode", session.config.trade_mode)
-    if hasattr(session.config, "risk_per_trade"):
-        session.config.risk_per_trade = runtime_config.get("risk_percent", session.config.risk_per_trade)
-    if hasattr(session.config, "engine"):
-        session.config.engine = runtime_config.get("strategy", session.config.engine)
-    if hasattr(session.config, "initial_balance"):
-        session.config.initial_balance = runtime_config.get("initial_balance", session.config.initial_balance)
+    stored = load_control_config_merged(session.id)
+    apply_stored_to_trading_session(session, stored)
     print("[SESSION CONFIG]")
     print(session.config)
     print("[SESSION START CONFIG]")
@@ -363,6 +347,8 @@ async def session_control_restart(req: Request, payload: dict = Body(...)):
     manager = req.app.state.manager
     session = _get_session_for_control(manager, payload)
     _ensure_engine_config(session)
+    stored = load_control_config_merged(session.id)
+    apply_stored_to_trading_session(session, stored)
 
     if session.mode == "paper":
         paper_service.stop(session)

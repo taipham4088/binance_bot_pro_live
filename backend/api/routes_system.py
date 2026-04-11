@@ -5,6 +5,11 @@ from trading_core.config.engine_config import EngineConfig
 from fastapi import APIRouter, Request, HTTPException
 from backend.runtime.exchange_config import exchange_config
 from backend.runtime.runtime_config import runtime_config
+from backend.runtime.session_config_store import (
+    apply_stored_to_trading_session,
+    ensure_engine_config,
+    load_control_config_merged,
+)
 from backend.core.trading_session import canonical_session_id, mode_defers_execution_bootstrap
 
 router = APIRouter()
@@ -57,13 +62,16 @@ def create_session(request: Request, mode: str | None = None):
             "mode": existing.mode,
         }
 
-    # ✅ default EngineConfig cho app session (aligned with runtime_config)
+    stored = load_control_config_merged(sid)
     cfg = EngineConfig(
-        initial_balance=10000,
-        risk_per_trade=0.01,
-        symbol=runtime_config.get("symbol") or "BTCUSDT",
-        exchange=runtime_config.get("exchange") or "binance",
+        initial_balance=float(stored.get("initial_balance") or 10000),
+        risk_per_trade=float(stored.get("risk_percent") or 0.01),
+        symbol=str(stored.get("symbol") or runtime_config.get("symbol") or "BTCUSDT"),
+        exchange=str(stored.get("exchange") or runtime_config.get("exchange") or "binance"),
+        mode=effective_mode,
+        trade_mode=str(stored.get("trade_mode") or "dual"),
     )
+    setattr(cfg, "engine", str(stored.get("strategy") or "range_trend"))
 
     defer = mode_defers_execution_bootstrap(effective_mode)
     if effective_mode in ("paper", "backtest"):
@@ -87,11 +95,15 @@ def create_session(request: Request, mode: str | None = None):
 @router.post("/session/start/{session_id}")
 async def start_session(request: Request, session_id: str):
     manager = request.app.state.manager
-    if not manager.get(session_id):
+    sess = manager.get(session_id)
+    if not sess:
         raise HTTPException(
             status_code=404,
             detail=f"Session not found: {session_id!r} — create it first via POST /session/create",
         )
+
+    ensure_engine_config(sess)
+    apply_stored_to_trading_session(sess, load_control_config_merged(session_id))
 
     session = manager.start_session(session_id)
 
@@ -102,11 +114,10 @@ async def start_session(request: Request, session_id: str):
     if session.mode == "live":
         from backend.services.live_service import LiveService
         service = LiveService()
-        service.start(
-            session,
-            symbol=runtime_config.get("symbol", "BTCUSDT"),
-            timeframe="5m",
+        sym = getattr(session.config, "symbol", None) or runtime_config.get(
+            "symbol", "BTCUSDT"
         )
+        service.start(session, symbol=str(sym), timeframe="5m")
 
     return {
         "session_id": session.id,

@@ -13,7 +13,7 @@
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/gridstack@8.4.0/dist/gridstack-all.js"></script>
 
-<script src="/dashboard/js/dashboard_v6.js?v=18" defer></script>
+<script src="/dashboard/js/dashboard_v6.js?v=21" defer></script>
 
 </head>
 
@@ -214,13 +214,14 @@ onchange="pendingButton('symbol_select')"></select>
 
 <div class="control-row">
 
-<label>Risk</label>
+<label>Risk (% of equity per trade)</label>
 
 <input id="risk_input"
 oninput="pendingButton('risk_input')"
 type="number"
 value="1"
-step="0.1"
+step="0.01"
+min="0"
 >
 
 <button onclick="setRisk(this)">Apply</button>

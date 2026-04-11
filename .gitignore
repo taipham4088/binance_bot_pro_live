@@ -44,3 +44,12 @@ data/live_shadow/
 
 # PyCharm
 .idea/
+
+# Session config (new multi-session control panel)
+data/sessions/
+
+# Runtime config (local only)
+data/runtime_config.json
+
+# Python cache (backend nested)
+backend/**/__pycache__/

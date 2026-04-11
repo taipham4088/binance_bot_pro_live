@@ -284,14 +284,30 @@ async function fetchJsonSafe(url) {
   return res.json()
 }
 
+/** Backend + /api/control/risk use risk as a fraction (e.g. 0.01 = 1%). Input shows percent. */
+function riskFractionToDisplayPercent(fraction) {
+  const n = Number(fraction)
+  if (!Number.isFinite(n) || n < 0) return ""
+  const pct = n * 100
+  if (!Number.isFinite(pct)) return ""
+  return String(pct)
+}
+
+function riskPercentInputToFraction(raw) {
+  const n = Number(String(raw ?? "").trim())
+  if (!Number.isFinite(n) || n <= 0) return NaN
+  return n / 100
+}
+
 function collectSessionConfigPayload() {
   const tradeMode = document.getElementById("trade_mode_select")?.value
   const riskRaw = document.getElementById("risk_input")?.value
   const initialRaw = document.getElementById("initial_balance")?.value
   const strategy = document.getElementById("strategy_select")?.value
+  const rf = riskPercentInputToFraction(riskRaw)
   return {
     trade_mode: tradeMode,
-    risk_percent: Number(riskRaw),
+    risk_percent: Number.isFinite(rf) ? rf : 0.01,
     initial_balance: Number(initialRaw),
     strategy,
   }
@@ -327,7 +343,16 @@ async function syncSessionConfigFromControlPanel() {
   }
 }
 
-/** Hydrate trade_mode / risk / balance / strategy from the selected session (not global runtime_config). */
+/** After /api/control/* succeeds; session POST can fail if session row missing — do not block Apply UI. */
+async function syncSessionConfigAfterControl() {
+  try {
+    await syncSessionConfigFromControlPanel()
+  } catch (e) {
+    console.warn("[control panel] session config sync skipped:", e?.message || e)
+  }
+}
+
+/** Hydrate entire control panel from GET /api/session/config (per-session store only; never from /api/dashboard config). */
 async function loadSessionConfig() {
   const sid = selectedDashboardSession || "live"
   try {
@@ -335,6 +360,27 @@ async function loadSessionConfig() {
     const data = await res.json().catch(() => ({}))
     if (!res.ok || data.error) {
       return
+    }
+
+    const tms = document.getElementById("trading_mode_select")
+    if (tms && Array.from(tms.options).some((o) => o.value === sid)) {
+      tms.value = sid
+    }
+
+    const ex = document.getElementById("exchange_select")
+    if (ex && data.exchange != null && String(data.exchange) !== "") {
+      const ev = String(data.exchange)
+      if (Array.from(ex.options).some((o) => o.value === ev)) {
+        ex.value = ev
+      }
+    }
+
+    const sym = document.getElementById("symbol_select")
+    if (sym && data.symbol != null && String(data.symbol) !== "") {
+      const sv = String(data.symbol)
+      if (Array.from(sym.options).some((o) => o.value === sv)) {
+        sym.value = sv
+      }
     }
 
     const tm = document.getElementById("trade_mode_select")
@@ -352,7 +398,7 @@ async function loadSessionConfig() {
       data.risk_percent !== null &&
       !Number.isNaN(Number(data.risk_percent))
     ) {
-      ri.value = String(data.risk_percent)
+      ri.value = riskFractionToDisplayPercent(data.risk_percent)
     }
 
     const ib = document.getElementById("initial_balance")
@@ -376,9 +422,12 @@ async function loadSessionConfig() {
     }
 
     syncControlLastAppliedFromConfig({
+      mode: sid,
       trade_mode: data.trade_mode,
       risk_percent: data.risk_percent,
       strategy: data.strategy,
+      exchange: data.exchange,
+      symbol: data.symbol,
     })
     if (
       data.initial_balance !== undefined &&
@@ -387,6 +436,13 @@ async function loadSessionConfig() {
     ) {
       lastAppliedControlValues["initial_balance"] = String(Number(data.initial_balance))
     }
+
+    if (!controlPanelBaselineReady) {
+      applySymbolSelectFromBaseline()
+      controlInitialized = true
+      controlPanelBaselineReady = true
+    }
+
     refreshControlApplyButtonStates()
   } catch (_e) {
     /* session may not exist yet */
@@ -496,6 +552,12 @@ function getSessionQueryParams() {
   return params.toString()
 }
 
+/** Scope /api/control/* mutations to the dashboard-selected session (per-session JSON + live object). */
+function controlPanelSessionQuery() {
+  const s = selectedDashboardSession || "live"
+  return `?session=${encodeURIComponent(s)}`
+}
+
 function getTradeHistoryQueryParams() {
   const params = new URLSearchParams()
   // Always bind history to selected session (UI isolation).
@@ -539,8 +601,8 @@ async function onSessionSelectionChanged() {
   dualPanelModeEnabled = dual ? dual.checked === true : false
   localStorage.setItem("dashboard-session", selectedDashboardSession)
   localStorage.setItem("dashboard-dual-panel", dualPanelModeEnabled ? "1" : "0")
-  await loadDashboard()
   await loadSessionConfig()
+  await loadDashboard()
   await updateTrades()
   await updateExecutionHistory()
 }
@@ -564,7 +626,7 @@ function syncControlLastAppliedFromConfig(config) {
     const v = config[configKey]
     if (configKey === "risk_percent") {
       if (v !== undefined && v !== null && !Number.isNaN(Number(v))) {
-        lastAppliedControlValues[elementId] = String(v)
+        lastAppliedControlValues[elementId] = riskFractionToDisplayPercent(Number(v))
       }
       continue
     }
@@ -663,7 +725,7 @@ document.addEventListener("DOMContentLoaded", function(){
       markControlApplyCommitted("initial_balance", String(Number(value)))
       if (btn) flashButton(btn)
     } catch (e) {
-      console.error(e)
+      console.warn("[control panel] initial balance apply failed:", e?.message || e)
     }
   })
 })
@@ -737,10 +799,8 @@ updateRisk(data)
 //updateSystemMonitor(data)
 updateStrategy(data)
 updateMarketBias(data)
-// Restore Pause / Resume
+// Pause / Resume only (global trading_enabled — not session control fields)
 if(data.config){
-
-syncControlLastAppliedFromConfig(data.config)
 
 const paused = data.config.trading_enabled === false
 
@@ -763,105 +823,16 @@ document.getElementById("pause_btn").style.color = ""
 }
 
 }
-// Restore Control Panel
-if(data.config && !controlInitialized){
 
-// Trade Mode
-if(data.config.trade_mode){
+await loadSessionConfig()
 
-document.getElementById("trade_mode_select").value =
-normalizeDashboardTradeMode(data.config.trade_mode)
-
-flashButton(
-document.querySelector("#trade_mode_select")
-.closest(".control-row")
-.querySelector("button")
-)
-
-}
-
-// Strategy
-if(data.config.strategy){
-
-document.getElementById("strategy_select").value =
-normalizeDashboardStrategy(data.config.strategy)
-
-flashButton(
-document.querySelector("#strategy_select")
-.closest(".control-row")
-.querySelector("button")
-)
-
-}
-
-// Trading Mode
-if(data.config.mode){
-
-document.getElementById("trading_mode_select").value =
-data.config.mode
-
-flashButton(
-document.querySelector("#trading_mode_select")
-.closest(".control-row")
-.querySelector("button")
-)
-
-}
-
-// Exchange
-if(data.config.exchange){
-
-document.getElementById("exchange_select").value =
-data.config.exchange
-
-flashButton(
-document.querySelector("#exchange_select")
-.closest(".control-row")
-.querySelector("button")
-)
-
-}
-
-// Symbol
-if(data.config.symbol){
-
-document.getElementById("symbol_select").value =
-data.config.symbol
-
-flashButton(
-document.querySelector("#symbol_select")
-.closest(".control-row")
-.querySelector("button")
-)
-
-}
-
-// Risk (0 is valid — do not use truthy check)
-if(data.config.risk_percent !== undefined && data.config.risk_percent !== null
-&& !Number.isNaN(Number(data.config.risk_percent))){
-
-document.getElementById("risk_input").value =
-data.config.risk_percent
-
-flashButton(
-document.querySelector("#risk_input")
-.closest(".control-row")
-.querySelector("button")
-)
-
-}
-
+if(!controlPanelBaselineReady){
 applySymbolSelectFromBaseline()
-
 controlInitialized = true
 controlPanelBaselineReady = true
 refreshControlApplyButtonStates()
-
-} else if (data.config && controlInitialized && controlPanelBaselineReady) {
-
-refreshControlApplyButtonStates()
-
 }
+
 //updatePerformance(data)
 
 updateSlippage(data)
@@ -870,8 +841,6 @@ updateAlerts(data)
 updateExecutionPipeline(data)
 updateExecutionHistory()
 updateOrderLifecycle(data)
-
-await loadSessionConfig()
 
 }catch(e){
 
@@ -2068,7 +2037,7 @@ document.getElementById("exchange_select").value
 
 try{
 
-await fetch("/api/control/exchange",{
+await fetch(`/api/control/exchange${controlPanelSessionQuery()}`,{
 method:"POST",
 headers:{
 "Content-Type":"application/json"
@@ -2141,20 +2110,26 @@ ${execution}
 
 async function setRisk(btn){
 
-const risk = document.getElementById("risk_input").value
+const display = document.getElementById("risk_input").value
+const fraction = riskPercentInputToFraction(display)
+
+if(!Number.isFinite(fraction) || fraction <= 0){
+console.error("Invalid risk: enter a positive percent (e.g. 1 for 1%)")
+return
+}
 
 try{
 
-await fetch("/api/control/risk",{
+await fetch(`/api/control/risk${controlPanelSessionQuery()}`,{
 method:"POST",
 headers:{
 "Content-Type":"application/json"
 },
-body:JSON.stringify({risk:parseFloat(risk)})
+body:JSON.stringify({risk:fraction})
 })
-await syncSessionConfigFromControlPanel()
+await syncSessionConfigAfterControl()
 
-markControlApplyCommitted("risk_input", risk)
+markControlApplyCommitted("risk_input", display)
 
 flashButton(btn)
 
@@ -2180,7 +2155,7 @@ headers:{
 },
 body:JSON.stringify({mode})
 })
-await syncSessionConfigFromControlPanel()
+await syncSessionConfigAfterControl()
 
 markControlApplyCommitted("trade_mode_select", mode)
 
@@ -2228,14 +2203,14 @@ const strategy = document.getElementById("strategy_select").value
 
 try{
 
-await fetch("/api/control/strategy",{
+await fetch(`/api/control/strategy${controlPanelSessionQuery()}`,{
 method:"POST",
 headers:{
 "Content-Type":"application/json"
 },
 body:JSON.stringify({strategy})
 })
-await syncSessionConfigFromControlPanel()
+await syncSessionConfigAfterControl()
 
 markControlApplyCommitted("strategy_select", strategy)
 
@@ -2256,7 +2231,7 @@ const symbol = document.getElementById("symbol_select").value
 
 try{
 
-await fetch("/api/control/symbol",{
+await fetch(`/api/control/symbol${controlPanelSessionQuery()}`,{
 method:"POST",
 headers:{
 "Content-Type":"application/json"
