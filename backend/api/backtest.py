@@ -1,8 +1,12 @@
+import json
+import os
+
+import pandas as pd
 from fastapi import APIRouter
-from backend.backtest.replay_engine import backtest_engine
 from pydantic import BaseModel
 
-import os
+from backend.backtest.replay_engine import backtest_engine
+from backend.services.backtest_service import BACKTEST_LATEST_CSV
 
 router = APIRouter()
 
@@ -33,3 +37,17 @@ def list_backtest_files():
     ]
 
     return files
+
+
+@router.get("/api/backtest/latest")
+def get_backtest_latest_trades():
+    """Return rows from the single canonical backtest export CSV (JSON array)."""
+    if not os.path.isfile(BACKTEST_LATEST_CSV):
+        return []
+    try:
+        df = pd.read_csv(BACKTEST_LATEST_CSV)
+    except Exception:
+        return []
+    if df.empty:
+        return []
+    return json.loads(df.to_json(orient="records"))

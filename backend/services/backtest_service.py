@@ -1,7 +1,9 @@
 import os
-from datetime import datetime
 
 import pandas as pd
+
+BACKTEST_OUTPUT_DIR = os.path.join("data", "backtest", "output")
+BACKTEST_LATEST_CSV = os.path.join(BACKTEST_OUTPUT_DIR, "backtest_latest.csv")
 
 from trading_core.runners.backtest import prepare_data
 from trading_core.runtime.context import RuntimeContext
@@ -24,9 +26,25 @@ def _initial_balance_from_config(config, default: float = 10000.0) -> float:
 class BacktestService:
     """CSV backtest using trading_core DualEngine (no StrategyHost ports required)."""
 
+    @staticmethod
+    def _remove_latest_csv() -> None:
+        if os.path.isfile(BACKTEST_LATEST_CSV):
+            try:
+                os.remove(BACKTEST_LATEST_CSV)
+            except OSError:
+                pass
+
+    @staticmethod
+    def _write_latest_csv(trades) -> None:
+        os.makedirs(BACKTEST_OUTPUT_DIR, exist_ok=True)
+        df = pd.DataFrame(trades)
+        df.to_csv(BACKTEST_LATEST_CSV, index=False)
+
     def run(self, session, csv_path):
         print(f"[BACKTEST RUN] session_id={session.id}")
         print(f"[BACKTEST RUN] csv_path={csv_path}")
+        os.makedirs(BACKTEST_OUTPUT_DIR, exist_ok=True)
+        self._remove_latest_csv()
         df = prepare_data(csv_path)
         print(f"[BACKTEST RUN] rows={len(df)}")
         context = RuntimeContext(session.config)
@@ -63,17 +81,12 @@ class BacktestService:
         session.state_bus.on_equity(total, account.get_equity())
 
         session.status = "FINISHED"
+        self._write_latest_csv(engine.trades)
         return engine.trades, session.state_bus.snapshot()
 
     def export(self, session):
         if not getattr(session, "engine", None):
             raise RuntimeError("Backtest engine not available")
 
-        trades = session.engine.trades
-        df = pd.DataFrame(trades)
-
-        os.makedirs("data/backtest/output", exist_ok=True)
-        filename = f"backtest_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
-        path = os.path.join("data", "backtest", "output", filename)
-        df.to_csv(path, index=False)
-        return os.path.abspath(path)
+        self._write_latest_csv(session.engine.trades)
+        return os.path.abspath(BACKTEST_LATEST_CSV)

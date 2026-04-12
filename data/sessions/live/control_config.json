@@ -1,0 +1,8 @@
+{
+  "trade_mode": "dual",
+  "strategy": "range_trend",
+  "exchange": "binance",
+  "initial_balance": 10000.0,
+  "symbol": "BTCUSDT",
+  "risk_percent": 0.03
+}

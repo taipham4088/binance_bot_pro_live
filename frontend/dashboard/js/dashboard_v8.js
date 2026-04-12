@@ -93,6 +93,11 @@ let backtestIdleMode = false
 /** Unix seconds at last backtest UI reset; recent_trades must be newer than this to count as started. */
 let backtestResetTimestamp = 0
 
+/** Client backtest lifecycle: idle → running → finished (deterministic UI between runs). */
+let v8BacktestState = "idle"
+/** Set after `/api/backtest/latest` successfully fills `recentTrades` for a finished run. */
+let backtestCsvLoaded = false
+
 function isBacktestHardReset() {
   return String(selectedDashboardSession || "").toLowerCase() === "backtest" && backtestUIHardReset
 }
@@ -202,6 +207,14 @@ function v8Dash(v) {
   if (v === null || v === undefined || v === "") return "—"
   if (typeof v === "number" && Number.isNaN(v)) return "—"
   return String(v)
+}
+
+/** Trade history PnL / fee display: fixed 2 decimals (deterministic; NaN → "0.00"). */
+function v8FormatNumber2(value) {
+  if (value === null || value === undefined) return "0.00"
+  const num = Number(value)
+  if (isNaN(num)) return "0.00"
+  return num.toFixed(2)
 }
 
 function formatCurrency(val) {
@@ -673,6 +686,11 @@ document.addEventListener("click", async (e) => {
         return
       }
       sessionControlStatus(`IMPORT ${sid.toUpperCase()} ok`)
+      if (sid === "backtest") {
+        v8ResetBacktestState()
+        v8BacktestState = "idle"
+        backtestCsvLoaded = false
+      }
       await refreshSessionStatuses()
     } catch (err) {
       sessionControlStatus(
@@ -933,11 +951,6 @@ async function loadSessionConfig() {
       return
     }
 
-    const tms = document.getElementById("trading_mode_select")
-    if (tms && Array.from(tms.options).some((o) => o.value === sid)) {
-      tms.value = sid
-    }
-
     const ex = document.getElementById("exchange_select")
     if (ex && data.exchange != null && String(data.exchange) !== "") {
       const ev = String(data.exchange)
@@ -993,7 +1006,6 @@ async function loadSessionConfig() {
     }
 
     syncControlLastAppliedFromConfig({
-      mode: sid,
       trade_mode: data.trade_mode,
       risk_percent: data.risk_percent,
       strategy: data.strategy,
@@ -1231,6 +1243,72 @@ Waiting for backtest execution…
 `
 }
 
+/** True when the dashboard payload indicates a completed backtest (progress scale 0–1 or 0–100). */
+function v8IsBacktestFinished(data) {
+  if (!data) return false
+  if (data.backtest_finished === true || data?.pnl?.backtest_finished === true) return true
+  if (data.status === "finished") return true
+  const pRaw = data.backtest_progress ?? data?.pnl?.backtest_progress
+  if (pRaw === undefined || pRaw === null || pRaw === "") return false
+  const p = Number(pRaw)
+  if (!Number.isFinite(p)) return false
+  if (p > 1) return p >= 100
+  return p >= 1
+}
+
+/** True while a backtest is in progress (not finished); used for lifecycle transitions. */
+function v8BacktestIsRunningPayload(data) {
+  if (!data || v8IsBacktestFinished(data)) return false
+  if (String(data.status || "").toLowerCase() === "running") return true
+  if (data.backtest_running === true) return true
+  if (!v8BacktestDashboardLooksStarted(data)) return false
+  const prog = Number(data.backtest_progress ?? data?.pnl?.backtest_progress)
+  if (Number.isFinite(prog) && prog >= 1) return false
+  return true
+}
+
+/** Clear stale backtest client state when a new run starts (no full session reset / Ctrl+F5). */
+function v8ResetBacktestState() {
+  v8PaintToken++
+  recentTrades = []
+  tradeHistory = []
+  lastTrades = []
+  lastMetricsSummary = null
+  lastDashboardPayload = null
+  backtestCsvLoaded = false
+  executionHistory = []
+  lastExecution = []
+  lastTradeRowTimeSec = 0
+  v8TradeHistoryCleared = false
+  delete dashboardSessionCache["backtest"]
+  resetBacktestSummary()
+  resetBacktestPnL()
+  const tradeTbody = document.querySelector("#trade_history_v8 tbody")
+  if (tradeTbody) {
+    tradeTbody.innerHTML = `<tr><td colspan="${V8_TRADE_HISTORY_COLS}" class="v8-empty">—</td></tr>`
+  }
+  equityHistory = []
+  lastEquityChartKey = ""
+  if (v8TradesHistoryPollActive()) {
+    void updateTrades(true)
+  }
+}
+
+/** Load canonical `data/backtest/output/backtest_latest.csv` into `recentTrades` after export completes. */
+async function v8LoadBacktestTrades() {
+  try {
+    const res = await fetch("/api/backtest/latest")
+    if (!res.ok) return
+    const trades = await res.json()
+    if (Array.isArray(trades) && trades.length > 0) {
+      recentTrades = trades
+      backtestCsvLoaded = true
+    }
+  } catch (_e) {
+    /* latest CSV may be missing until export */
+  }
+}
+
 /** True when payload has at least one trade strictly after the last backtest UI reset (unix seconds). */
 function v8IsNewBacktestRun(data) {
   const rt = data?.recent_trades
@@ -1263,6 +1341,7 @@ function v8IsNewBacktestRun(data) {
 
 /** Payload already carries backtest results; do not require trade time > backtestResetTimestamp (session switch). */
 function v8BacktestPayloadHasSummarySignals(data) {
+  if (v8IsBacktestFinished(data)) return true
   const rt = data?.recent_trades
   if (Array.isArray(rt) && rt.length > 0) return true
   const tc = data?.pnl?.trade_count
@@ -1325,8 +1404,15 @@ function v8BacktestDashboardLooksStarted(data) {
       }
     }
   }
+  if (!ok && v8IsBacktestFinished(data)) {
+    ok = true
+  }
   if (ok) {
-    if (v8IsNewBacktestRun(data) || data?.backtest_running === true) {
+    if (
+      v8IsNewBacktestRun(data) ||
+      data?.backtest_running === true ||
+      v8IsBacktestFinished(data)
+    ) {
       backtestIdleMode = false
     }
     backtestUIHardReset = false
@@ -1402,6 +1488,8 @@ function resetBacktestPanels() {
   }
 
   lastDashboardPayload = null
+  v8BacktestState = "idle"
+  backtestCsvLoaded = false
 }
 
 async function onSessionSelectionChanged() {
@@ -1409,6 +1497,10 @@ async function onSessionSelectionChanged() {
   const dual = document.getElementById("dual_panel_toggle")
   selectedDashboardSession = select ? String(select.value || "live").toLowerCase() : "live"
   dualPanelModeEnabled = dual ? dual.checked === true : false
+  if (String(selectedDashboardSession || "").toLowerCase() !== "backtest") {
+    v8BacktestState = "idle"
+    backtestCsvLoaded = false
+  }
   localStorage.setItem("dashboard-session", selectedDashboardSession)
   localStorage.setItem("dashboard-dual-panel", dualPanelModeEnabled ? "1" : "0")
   lastTradeRowTimeSec = 0
@@ -1457,7 +1549,6 @@ function syncControlLastAppliedFromConfig(config) {
   if (!config) return
   const pairs = [
     ["trade_mode_select", "trade_mode"],
-    ["trading_mode_select", "mode"],
     ["strategy_select", "strategy"],
     ["exchange_select", "exchange"],
     ["symbol_select", "symbol"],
@@ -1483,7 +1574,6 @@ const CONTROL_APPLY_IDS = [
   "risk_input",
   "initial_balance",
   "trade_mode_select",
-  "trading_mode_select",
   "strategy_select",
 ]
 
@@ -1595,7 +1685,8 @@ function v8PaintDashboardPayload(data) {
   if (
     paintSel === "backtest" &&
     !v8BacktestDashboardLooksStarted(data) &&
-    backtestResetActive
+    backtestResetActive &&
+    !v8IsBacktestFinished(data)
   ) {
     return
   }
@@ -1652,7 +1743,7 @@ function v8PaintDashboardPayload(data) {
     ) {
       return
     }
-    updateBacktestSummary(data)
+    void updateBacktestSummary(data)
   }
 }
 
@@ -1717,7 +1808,8 @@ if (
 if (
   sidBt === "backtest" &&
   dashboardSessionCache["backtest"] &&
-  !v8BacktestDashboardLooksStarted(data)
+  !v8BacktestDashboardLooksStarted(data) &&
+  !v8IsBacktestFinished(data)
 ) {
   if (typeof console !== "undefined" && console.debug) {
     console.debug("[V8] skip backtest apply: cached entry exists but payload not started")
@@ -1739,7 +1831,11 @@ if (sidBt === "backtest") {
       clearTimeout(v8BacktestResetFailsafeTimer)
       v8BacktestResetFailsafeTimer = null
     }
-  } else if (backtestResetActive && !backtestLifecycleRefresh) {
+  } else if (
+    backtestResetActive &&
+    !backtestLifecycleRefresh &&
+    !v8IsBacktestFinished(data)
+  ) {
     await loadSessionConfig()
     if (!controlPanelBaselineReady) {
       applySymbolSelectFromBaseline()
@@ -1766,9 +1862,24 @@ if (
   sidBt === "backtest" &&
   backtestResetActive &&
   !v8BacktestDashboardLooksStarted(data) &&
-  !backtestLifecycleRefresh
+  !backtestLifecycleRefresh &&
+  !v8IsBacktestFinished(data)
 ) {
   return
+}
+
+if (sidBt === "backtest") {
+  const isFinished = v8IsBacktestFinished(data)
+  const isRunning = v8BacktestIsRunningPayload(data)
+  if (isFinished && v8BacktestState !== "finished") {
+    v8BacktestState = "finished"
+  }
+  if (isRunning && v8BacktestState !== "running") {
+    v8ResetBacktestState()
+    v8BacktestState = "running"
+  } else if (!isRunning && !isFinished && !v8BacktestDashboardLooksStarted(data)) {
+    v8BacktestState = "idle"
+  }
 }
 
 lastDashboardPayload = data
@@ -2193,39 +2304,126 @@ function v8BacktestTradePnl(t) {
 }
 
 function v8BacktestTradeTimeSec(t) {
-  const v = t?.time ?? t?.timestamp
-  if (v == null) return null
-  if (typeof v === "number") {
-    return v > 1e12 ? Math.floor(v / 1000) : Math.floor(v)
-  }
-  if (typeof v === "string" && /^\d+$/.test(v)) {
-    const n = Number(v)
-    return n > 1e12 ? Math.floor(n / 1000) : Math.floor(n)
+  const ms = v8BacktestTradeInstantMs(t)
+  if (ms == null || !Number.isFinite(ms)) return null
+  return Math.floor(ms / 1000)
+}
+
+/** Milliseconds since epoch for range math (CSV / API may use datetime, exit_time, etc.). */
+function v8BacktestTradeInstantMs(t) {
+  if (!t || typeof t !== "object") return null
+  const candidates = [
+    t.datetime,
+    t.exit_time,
+    t.entry_time,
+    t.time,
+    t.timestamp,
+  ]
+  for (const v of candidates) {
+    if (v == null || v === "") continue
+    if (typeof v === "number" && Number.isFinite(v)) {
+      return v > 1e12 ? v : v * 1000
+    }
+    if (typeof v === "string") {
+      if (/^\d+$/.test(v)) {
+        const n = Number(v)
+        if (!Number.isFinite(n)) continue
+        return n > 1e12 ? n : n * 1000
+      }
+      const parsed = Date.parse(v)
+      if (!Number.isNaN(parsed)) return parsed
+    }
   }
   return null
 }
 
-function v8BacktestMaxDrawdownDollars(trades, startBalance) {
-  const sb = Number(startBalance)
-  if (!Number.isFinite(sb) || sb <= 0) return null
-  if (!Array.isArray(trades) || trades.length === 0) return null
-  const sorted = [...trades].sort((a, b) => {
-    const ta = v8BacktestTradeTimeSec(a) ?? 0
-    const tb = v8BacktestTradeTimeSec(b) ?? 0
-    return ta - tb
-  })
-  let eq = sb
-  let peak = eq
+function v8MaxDrawdownDollarsFromEquityCurve(equityCurve) {
+  if (!Array.isArray(equityCurve) || equityCurve.length === 0) return null
+  let peak = equityCurve[0]
+  if (!Number.isFinite(peak)) return null
   let maxDd = 0
-  for (const t of sorted) {
-    const p = v8BacktestTradePnl(t)
-    if (p == null) continue
-    eq += p
+  for (let i = 1; i < equityCurve.length; i++) {
+    const eq = equityCurve[i]
+    if (!Number.isFinite(eq)) continue
     if (eq > peak) peak = eq
     const dd = peak - eq
     if (dd > maxDd) maxDd = dd
   }
   return maxDd > 0 ? maxDd : null
+}
+
+/**
+ * Closed-trade equity series and drawdown vs running peak (same path as journal curve).
+ * @returns {{ equityCurve: number[], maxDrawdown: number|null, peak: number }|null}
+ */
+function v8BacktestEquityCurveFromTrades(trades, startBalance) {
+  const sb = Number(startBalance)
+  if (!Number.isFinite(sb) || sb <= 0) return null
+  if (!Array.isArray(trades) || trades.length === 0) {
+    return { equityCurve: [sb], maxDrawdown: null, peak: sb }
+  }
+  const sorted = [...trades].sort((a, b) => {
+    const ta = v8BacktestTradeTimeSec(a) ?? 0
+    const tb = v8BacktestTradeTimeSec(b) ?? 0
+    return ta - tb
+  })
+  const equityCurve = [sb]
+  let eq = sb
+  let peak = eq
+  let maxDdFrac = 0
+  for (const t of sorted) {
+    const p = v8BacktestTradePnl(t)
+    if (p == null) continue
+    eq += p
+    equityCurve.push(eq)
+    if (eq > peak) peak = eq
+    if (peak > 1e-12) {
+      const dd = (peak - eq) / peak
+      if (dd > maxDdFrac) maxDdFrac = dd
+    }
+  }
+  return {
+    equityCurve,
+    maxDrawdown: maxDdFrac > 1e-12 ? maxDdFrac : null,
+    peak,
+  }
+}
+
+function v8BacktestMaxDrawdownDollars(trades, startBalance) {
+  const pack = v8BacktestEquityCurveFromTrades(trades, startBalance)
+  if (!pack) return null
+  return v8MaxDrawdownDollarsFromEquityCurve(pack.equityCurve)
+}
+
+/** Max drawdown as fraction of running peak equity (0–1), from closed-trade PnL series. */
+function v8BacktestMaxDrawdownFractionFromTrades(trades, startBalance) {
+  const pack = v8BacktestEquityCurveFromTrades(trades, startBalance)
+  return pack?.maxDrawdown ?? null
+}
+
+function v8JournalRealizedPnlSum(trades) {
+  if (!Array.isArray(trades) || !trades.length) return null
+  let sum = 0
+  let any = false
+  for (const t of trades) {
+    const p = v8BacktestTradePnl(t)
+    if (p == null) continue
+    any = true
+    sum += p
+  }
+  return any ? sum : null
+}
+
+function v8TradeSideIsLong(t) {
+  const s = String(t?.side ?? "").toUpperCase()
+  const d = String(t?.direction ?? t?.dir ?? "").toLowerCase()
+  return s === "LONG" || s === "BUY" || d === "long"
+}
+
+function v8TradeSideIsShort(t) {
+  const s = String(t?.side ?? "").toUpperCase()
+  const d = String(t?.direction ?? t?.dir ?? "").toLowerCase()
+  return s === "SHORT" || s === "SELL" || d === "short"
 }
 
 function v8FormatDurationSec(totalSec) {
@@ -2291,9 +2489,8 @@ function v8ComputeMetricsFromTrades(trades) {
   let shortTrades = 0
 
   for (const t of trades) {
-    const su = String(t?.side ?? "").toUpperCase()
-    if (su === "LONG" || su === "BUY") longTrades += 1
-    else if (su === "SHORT" || su === "SELL") shortTrades += 1
+    if (v8TradeSideIsLong(t)) longTrades += 1
+    else if (v8TradeSideIsShort(t)) shortTrades += 1
 
     const raw = v8BacktestTradePnl(t)
     if (raw == null) continue
@@ -2346,7 +2543,14 @@ function v8ComputeMetricsFromTrades(trades) {
 
 function computeBacktestSummary(trades) {
   const t = Array.isArray(trades) ? trades : []
-  if (selectedDashboardSession === "backtest" && backtestResetActive && t.length === 0) {
+  const finished =
+    lastDashboardPayload && v8IsBacktestFinished(lastDashboardPayload)
+  if (
+    selectedDashboardSession === "backtest" &&
+    backtestResetActive &&
+    t.length === 0 &&
+    !finished
+  ) {
     return null
   }
   if (isBacktestHardReset()) return null
@@ -2366,13 +2570,33 @@ function v8MergeBacktestSummaryMetricSources(data) {
   }
 }
 
+/**
+ * Single deterministic trade list for backtest metrics.
+ * Prefer dashboard / in-memory journal first (full run), then capped `/api/trades/history` buffers.
+ */
+function v8GetBacktestTrades(data) {
+  const primary = [data?.recent_trades, data?.trades, recentTrades]
+  const fallback = [tradeHistory, lastTrades]
+  let best = []
+  for (const s of primary) {
+    if (!Array.isArray(s) || s.length === 0) continue
+    if (s.length > best.length) best = s
+  }
+  if (best.length > 0) return best
+  for (const s of fallback) {
+    if (!Array.isArray(s) || s.length === 0) continue
+    if (s.length > best.length) best = s
+  }
+  return best
+}
+
 function v8BtSumRow(label, value) {
   const v =
     value === null || value === undefined || value === "" ? "—" : String(value)
   return `<div class="v8-kv"><span class="k">${label}</span><span class="v mono">${v}</span></div>`
 }
 
-function updateBacktestSummary(data) {
+async function updateBacktestSummary(data) {
   if (!data) return
   if (String(selectedDashboardSession || "").toLowerCase() !== "backtest") return
   const payloadSession = v8PayloadSessionHint(data)
@@ -2402,12 +2626,13 @@ function updateBacktestSummary(data) {
     }
   }
 
-  const tradesFromPayload = Array.isArray(data?.recent_trades) ? data.recent_trades : []
+  const isFinished = v8IsBacktestFinished(data)
   if (
     selectedDashboardSession === "backtest" &&
     backtestResetActive &&
-    (!recentTrades || recentTrades.length === 0) &&
-    tradesFromPayload.length === 0 &&
+    !isFinished &&
+    (!Array.isArray(recentTrades) || recentTrades.length === 0) &&
+    v8GetBacktestTrades(data).length === 0 &&
     !v8BacktestPayloadHasSummarySignals(data)
   ) {
     return
@@ -2417,23 +2642,16 @@ function updateBacktestSummary(data) {
   if (!root) return
   const cfg = data?.config || {}
   const pnl = data?.pnl || {}
-  const trades =
-    Array.isArray(data?.recent_trades) && data.recent_trades.length > 0
-      ? data.recent_trades
-      : Array.isArray(recentTrades) && recentTrades.length > 0
-        ? recentTrades
-        : []
+
+  if (isFinished) {
+    await v8LoadBacktestTrades()
+  }
+
+  const trades = Array.isArray(recentTrades) ? recentTrades.slice() : []
+  const journalN = trades.length
 
   let metrics = v8MergeBacktestSummaryMetricSources(data)
-  const journalN = trades.length
-  const mt = Number(metrics?.total_trades)
-  const wrN = Number(metrics?.win_rate)
-  const pnlN = Number(pnl.trade_count)
-  const metricsWinRateMissing = !Number.isFinite(wrN)
-  const metricsEmptyVersusJournal =
-    journalN > 0 &&
-    (!Number.isFinite(mt) || mt === 0 || (Number.isFinite(pnlN) && pnlN > 0 && pnlN > mt))
-  if (journalN > 0 && (metricsWinRateMissing || metricsEmptyVersusJournal)) {
+  if (journalN > 0) {
     const derived = v8ComputeMetricsFromTrades(trades)
     if (derived) metrics = { ...metrics, ...derived }
   }
@@ -2443,21 +2661,44 @@ function updateBacktestSummary(data) {
   const sym = pnl.symbol || cfg.symbol || "—"
   const tf = cfg.test_timeframe || cfg.timeframe || "—"
 
-  const timeSecs = trades.map(v8BacktestTradeTimeSec).filter((n) => n != null && n > 0)
-  const startTs = timeSecs.length ? Math.min(...timeSecs) : null
-  const endTs = timeSecs.length ? Math.max(...timeSecs) : null
-  const fmtDate = (ts) =>
-    ts != null
-      ? new Date(ts * 1000).toLocaleDateString(undefined, { dateStyle: "medium" })
-      : "—"
+  let startDateStr = "—"
+  let endDateStr = "—"
+  let durSec = null
+  let durationStr = "—"
+  let tradesPerDayStr = "—"
+
+  if (journalN > 0) {
+    const instants = trades
+      .map(v8BacktestTradeInstantMs)
+      .filter((ms) => ms != null && Number.isFinite(ms) && ms > 0)
+    if (instants.length > 0) {
+      const startMs = Math.min(...instants)
+      const endMs = Math.max(...instants)
+      startDateStr = new Date(startMs).toLocaleDateString(undefined, {
+        dateStyle: "medium",
+      })
+      endDateStr = new Date(endMs).toLocaleDateString(undefined, {
+        dateStyle: "medium",
+      })
+      if (endMs >= startMs) {
+        durSec = (endMs - startMs) / 1000
+        durationStr = v8FormatDurationSec(durSec)
+        const days = durSec / 86400
+        if (days > 1 / 8640) {
+          const tpd = journalN / Math.max(days, 1 / 8640)
+          tradesPerDayStr = Number.isFinite(tpd) ? formatNumber(tpd) : "—"
+        }
+      }
+    }
+  }
 
   let totalTrades = "—"
-  if (pnl.trade_count != null && pnl.trade_count !== "") {
+  if (journalN > 0) {
+    totalTrades = String(journalN)
+  } else if (pnl.trade_count != null && pnl.trade_count !== "") {
     totalTrades = String(pnl.trade_count)
   } else if (metrics.total_trades != null && metrics.total_trades !== "") {
     totalTrades = String(metrics.total_trades)
-  } else if (trades.length) {
-    totalTrades = String(trades.length)
   }
 
   let wr = Number(metrics.win_rate ?? metrics.winRate)
@@ -2478,20 +2719,41 @@ function updateBacktestSummary(data) {
     expectancy = Number.isFinite(e) ? formatCurrency(e) : "—"
   }
 
-  const streakPack = computeBacktestSummary(trades) || { maxWin: null, maxLoss: null }
-  let { maxWin, maxLoss } = streakPack
-  const mws = metrics.max_win_streak ?? metrics.maxWinStreak
-  const mls = metrics.max_loss_streak ?? metrics.maxLossStreak
-  if (mws != null && Number.isFinite(Number(mws))) maxWin = Number(mws)
-  if (mls != null && Number.isFinite(Number(mls))) maxLoss = Number(mls)
+  let maxWin = null
+  let maxLoss = null
+  const streakPack = computeBacktestSummary(trades)
+  if (streakPack) {
+    maxWin = streakPack.maxWin
+    maxLoss = streakPack.maxLoss
+  }
+  if (journalN === 0) {
+    const mws = metrics.max_win_streak ?? metrics.maxWinStreak
+    const mls = metrics.max_loss_streak ?? metrics.maxLossStreak
+    if (maxWin == null && mws != null && Number.isFinite(Number(mws))) maxWin = Number(mws)
+    if (maxLoss == null && mls != null && Number.isFinite(Number(mls))) maxLoss = Number(mls)
+  }
   const maxWinStr = maxWin != null ? String(maxWin) : "—"
   const maxLossStr = maxLoss != null ? String(maxLoss) : "—"
 
+  const startBalRaw =
+    pnl.start_balance ??
+    document.getElementById("initial_balance")?.value ??
+    cfg.initial_balance
+  const startBal = Number(startBalRaw)
+  const startBalOk = Number.isFinite(startBal) && startBal > 0
+
   const mddRaw = pnl.max_drawdown
-  const mddStr =
-    mddRaw != null && Number.isFinite(Number(mddRaw))
-      ? `${(Number(mddRaw) * 100).toFixed(2)}%`
-      : "—"
+  let mddStr = "—"
+  const journalCurvePack =
+    startBalOk && journalN > 0 ? v8BacktestEquityCurveFromTrades(trades, startBal) : null
+  if (journalCurvePack != null) {
+    mddStr =
+      journalCurvePack.maxDrawdown != null && Number.isFinite(journalCurvePack.maxDrawdown)
+        ? `${(journalCurvePack.maxDrawdown * 100).toFixed(2)}%`
+        : `0.00%`
+  } else if (mddRaw != null && Number.isFinite(Number(mddRaw))) {
+    mddStr = `${(Number(mddRaw) * 100).toFixed(2)}%`
+  }
 
   const blocked = Array.isArray(risk.blocked_rules) ? risk.blocked_rules : []
   const ddLockCount = blocked.filter((x) => /equity|drawdown|dd/i.test(String(x))).length
@@ -2520,19 +2782,20 @@ function updateBacktestSummary(data) {
     rr = Number.isFinite(ratio) ? formatNumber(ratio) : "—"
   }
 
-  const startBalRaw =
-    pnl.start_balance ??
-    document.getElementById("initial_balance")?.value ??
-    cfg.initial_balance
-  const startBal = Number(startBalRaw)
-  const startBalOk = Number.isFinite(startBal) && startBal > 0
-
-  let netProfit = Number(pnl.realized_pnl)
+  let netProfit = v8JournalRealizedPnlSum(trades)
+  if (!Number.isFinite(netProfit)) {
+    netProfit = Number(pnl.realized_pnl)
+  }
   if (!Number.isFinite(netProfit)) {
     netProfit = trades.reduce((s, t) => s + (v8BacktestTradePnl(t) ?? 0), 0)
   }
 
-  let maxDdDollars = startBalOk ? v8BacktestMaxDrawdownDollars(trades, startBal) : null
+  let maxDdDollars =
+    journalCurvePack != null
+      ? v8MaxDrawdownDollarsFromEquityCurve(journalCurvePack.equityCurve)
+      : startBalOk
+        ? v8BacktestMaxDrawdownDollars(trades, startBal)
+        : null
   if (maxDdDollars == null && startBalOk && mddRaw != null && Number.isFinite(Number(mddRaw))) {
     const frac = Math.abs(Number(mddRaw))
     if (frac > 0) maxDdDollars = frac * startBal
@@ -2540,7 +2803,18 @@ function updateBacktestSummary(data) {
 
   let recoveryStr = "—"
   const rfMetric = metrics.recovery_factor ?? metrics.recoveryFactor
-  if (rfMetric != null && Number.isFinite(Number(rfMetric))) {
+  if (journalCurvePack != null) {
+    if (maxDdDollars != null && maxDdDollars > 1e-9) {
+      const rf = netProfit / maxDdDollars
+      recoveryStr = Number.isFinite(rf) ? formatNumber(rf) : "—"
+    } else if (
+      Number.isFinite(netProfit) &&
+      netProfit !== 0 &&
+      (maxDdDollars == null || maxDdDollars <= 1e-9)
+    ) {
+      recoveryStr = netProfit > 0 ? "∞" : "—"
+    }
+  } else if (rfMetric != null && Number.isFinite(Number(rfMetric))) {
     recoveryStr = formatNumber(Number(rfMetric))
   } else if (maxDdDollars != null && maxDdDollars > 1e-9) {
     const rf = netProfit / maxDdDollars
@@ -2549,42 +2823,21 @@ function updateBacktestSummary(data) {
     recoveryStr = netProfit > 0 ? "∞" : "—"
   }
 
-  const durSec =
-    startTs != null && endTs != null && endTs >= startTs ? endTs - startTs : null
-  const durationStr = v8FormatDurationSec(durSec)
-
-  const tradeCountNum = Number(totalTrades)
-  const nTradesOk = Number.isFinite(tradeCountNum)
-  let tradesPerDayStr = "—"
-  if (nTradesOk && durSec != null && durSec > 0) {
-    const days = durSec / 86400
-    const tpd = days >= 1 / 8640 ? tradeCountNum / Math.max(days, 1 / 8640) : tradeCountNum
-    tradesPerDayStr = Number.isFinite(tpd) ? formatNumber(tpd) : "—"
-  } else if (nTradesOk && durSec === 0 && tradeCountNum > 0) {
-    tradesPerDayStr = "—"
-  }
-
-  const ltM = metrics.long_trades ?? metrics.long_count ?? metrics.longCount
-  const stM = metrics.short_trades ?? metrics.short_count ?? metrics.shortCount
-  const distFromMetrics =
-    ltM != null &&
-    stM != null &&
-    Number.isFinite(Number(ltM)) &&
-    Number.isFinite(Number(stM))
   let longCt = 0
   let shortCt = 0
-  if (distFromMetrics) {
-    longCt = Number(ltM)
-    shortCt = Number(stM)
+  if (journalN > 0) {
+    longCt = trades.filter(v8TradeSideIsLong).length
+    shortCt = trades.filter(v8TradeSideIsShort).length
   } else {
-    for (const t of trades) {
-      const side = String(t?.side ?? "").toUpperCase()
-      if (side === "LONG" || side === "BUY") longCt += 1
-      else if (side === "SHORT" || side === "SELL") shortCt += 1
-    }
+    const ltM = metrics.long_trades ?? metrics.long_count ?? metrics.longCount
+    const stM = metrics.short_trades ?? metrics.short_count ?? metrics.shortCount
+    if (ltM != null && Number.isFinite(Number(ltM))) longCt = Number(ltM)
+    if (stM != null && Number.isFinite(Number(stM))) shortCt = Number(stM)
   }
-  const longStr = distFromMetrics || trades.length ? String(longCt) : "—"
-  const shortStr = distFromMetrics || trades.length ? String(shortCt) : "—"
+  const longStr =
+    journalN > 0 || longCt > 0 || shortCt > 0 ? String(longCt) : "—"
+  const shortStr =
+    journalN > 0 || longCt > 0 || shortCt > 0 ? String(shortCt) : "—"
 
   root.innerHTML = `
     <div class="v8-backtest-summary-grid">
@@ -2592,8 +2845,8 @@ function updateBacktestSummary(data) {
         <h3 class="v8-backtest-summary-heading">Test info</h3>
         ${v8BtSumRow("Symbol", String(sym).toUpperCase())}
         ${v8BtSumRow("Timeframe", tf)}
-        ${v8BtSumRow("Start date", fmtDate(startTs))}
-        ${v8BtSumRow("End date", fmtDate(endTs))}
+        ${v8BtSumRow("Start date", startDateStr)}
+        ${v8BtSumRow("End date", endDateStr)}
         ${v8BtSumRow("Total trades", totalTrades)}
       </div>
       <div class="v8-backtest-summary-col">
@@ -2632,7 +2885,12 @@ function updateBacktestSummary(data) {
       </div>
     </div>
   `
-  recentTrades = trades
+  if (trades.length > (Array.isArray(recentTrades) ? recentTrades.length : 0)) {
+    recentTrades = trades
+  }
+  if (isFinished) {
+    updatePnL(lastDashboardPayload || data)
+  }
 }
 
 function pnlRenderOnePanel(panel, root){
@@ -2749,12 +3007,11 @@ function updatePnL(data) {
   ) {
     return
   }
-  const tradesFromPayloadPnl = Array.isArray(data?.recent_trades) ? data.recent_trades : []
   if (
     String(selectedDashboardSession || "").toLowerCase() === "backtest" &&
     backtestResetActive &&
-    (!recentTrades || recentTrades.length === 0) &&
-    tradesFromPayloadPnl.length === 0 &&
+    !v8IsBacktestFinished(data) &&
+    v8GetBacktestTrades(data).length === 0 &&
     !v8BacktestPayloadHasSummarySignals(data)
   ) {
     return
@@ -2769,7 +3026,8 @@ function updatePnL(data) {
     String(selectedDashboardSession || "").toLowerCase() === "backtest" &&
     backtestResetActive &&
     pnl &&
-    pnl.realized_pnl !== 0
+    pnl.realized_pnl !== 0 &&
+    !v8IsBacktestFinished(data)
   ) {
     return
   }
@@ -2781,30 +3039,90 @@ function updatePnL(data) {
     return
   }
 
-  const realized = formatCurrency(pnl.realized_pnl ?? 0)
-  const drawdown = (Number(pnl.max_drawdown ?? 0) * 100).toFixed(2) + "%"
-  const pf = lastMetricsSummary?.profit_factor
-  const pfStr =
-    pf != null && Number.isFinite(Number(pf)) ? formatNumber(pf) : "—"
+  const isBacktestSession = String(selectedDashboardSession || "").toLowerCase() === "backtest"
+  const btTrades = isBacktestSession
+    ? Array.isArray(recentTrades) && recentTrades.length > 0
+      ? recentTrades
+      : v8GetBacktestTrades(data)
+    : []
+  const sbBacktest = isBacktestSession
+    ? Number(
+        pnl.start_balance ??
+          document.getElementById("initial_balance")?.value ??
+          data?.config?.initial_balance
+      )
+    : NaN
+  const btCurvePack =
+    isBacktestSession && Number.isFinite(sbBacktest) && sbBacktest > 0
+      ? v8BacktestEquityCurveFromTrades(btTrades, sbBacktest)
+      : null
+
+  let realized = formatCurrency(pnl.realized_pnl ?? 0)
+  let drawdown = (Number(pnl.max_drawdown ?? 0) * 100).toFixed(2) + "%"
+  if (isBacktestSession && btTrades.length > 0) {
+    const sumPnl = v8JournalRealizedPnlSum(btTrades)
+    if (sumPnl != null && Number.isFinite(sumPnl)) {
+      realized = formatCurrency(sumPnl)
+    }
+  }
+  if (isBacktestSession && btCurvePack != null) {
+    drawdown =
+      btCurvePack.maxDrawdown != null && Number.isFinite(btCurvePack.maxDrawdown)
+        ? `${(btCurvePack.maxDrawdown * 100).toFixed(2)}%`
+        : `0.00%`
+  }
+
+  let pfStr = "—"
+  if (isBacktestSession) {
+    const derived =
+      btTrades.length > 0 ? v8ComputeMetricsFromTrades(btTrades) : null
+    const pf =
+      derived?.profit_factor ?? lastMetricsSummary?.profit_factor
+    if (pf != null && Number.isFinite(Number(pf))) {
+      pfStr = formatNumber(Number(pf))
+    }
+  } else {
+    const pf = lastMetricsSummary?.profit_factor
+    if (pf != null && Number.isFinite(Number(pf))) pfStr = formatNumber(Number(pf))
+  }
 
   const panels = Array.isArray(pnl.panels) ? pnl.panels : []
   let equityStr = "—"
   let floatingHtml = ""
   let totalEq = null
 
+  const journalLastEquity =
+    isBacktestSession &&
+    btCurvePack?.equityCurve?.length &&
+    Number.isFinite(btCurvePack.equityCurve[btCurvePack.equityCurve.length - 1])
+      ? btCurvePack.equityCurve[btCurvePack.equityCurve.length - 1]
+      : null
+
   if (panels.length === 0) {
-    equityStr = pnlFmtNum(pnl.equity)
+    equityStr =
+      journalLastEquity != null ? pnlFmtNum(journalLastEquity) : pnlFmtNum(pnl.equity)
     const fp = pnlFloatingPrefix(pnl.floating_pnl)
     const fc = pnlFloatingStyle(pnl.floating_pnl)
     floatingHtml = `<span class="v8-floating" style="color:${fc}">${fp}${pnlFmtNum(pnl.floating_pnl)}</span>`
-    totalEq = pnl.total_equity != null ? Number(pnl.total_equity) : null
+    totalEq =
+      journalLastEquity != null
+        ? journalLastEquity
+        : pnl.total_equity != null
+          ? Number(pnl.total_equity)
+          : null
   } else if (panels.length === 1) {
     const p0 = panels[0]
-    equityStr = pnlFmtNum(p0?.equity)
+    equityStr =
+      journalLastEquity != null ? pnlFmtNum(journalLastEquity) : pnlFmtNum(p0?.equity)
     const fp = pnlFloatingPrefix(p0?.floating)
     const fc = pnlFloatingStyle(p0?.floating)
     floatingHtml = `<span class="v8-floating" style="color:${fc}">${fp}${pnlFmtNum(p0?.floating)}</span>`
-    totalEq = p0?.total_equity != null ? Number(p0.total_equity) : null
+    totalEq =
+      journalLastEquity != null
+        ? journalLastEquity
+        : p0?.total_equity != null
+          ? Number(p0.total_equity)
+          : null
   } else {
     equityStr = `${panels.length} sessions`
     floatingHtml = ""
@@ -2883,11 +3201,14 @@ function v8BuildTradeRowTr(t) {
   const entry = v8Dash(t.entry)
   const exit = v8Dash(t.exit)
   const pnlRaw = t.pnl
-  const pnlStr = v8Dash(pnlRaw)
+  const pnlStr =
+    pnlRaw !== null && pnlRaw !== undefined && pnlRaw !== "" && Number.isFinite(Number(pnlRaw))
+      ? v8FormatNumber2(pnlRaw)
+      : "—"
   const feeRaw = t.fees ?? t.fee
   const feeStr =
-    feeRaw !== null && feeRaw !== undefined && feeRaw !== ""
-      ? Number(feeRaw).toFixed(4)
+    feeRaw !== null && feeRaw !== undefined && feeRaw !== "" && Number.isFinite(Number(feeRaw))
+      ? v8FormatNumber2(feeRaw)
       : "—"
   const strat = v8Dash(t.strategy)
   const sess = v8Dash(t.mode)
@@ -4068,33 +4389,6 @@ body:JSON.stringify({mode})
 await syncSessionConfigAfterControl()
 
 markControlApplyCommitted("trade_mode_select", mode)
-
-flashButton(btn)
-
-}catch(e){
-
-console.error(e)
-
-}
-
-}
-
-
-async function setTradingMode(btn){
-
-const mode = document.getElementById("trading_mode_select").value
-
-try{
-
-await fetch("/api/control/mode",{
-method:"POST",
-headers:{
-"Content-Type":"application/json"
-},
-body:JSON.stringify({mode})
-})
-
-markControlApplyCommitted("trading_mode_select", mode)
 
 flashButton(btn)
 

@@ -1,0 +1,8 @@
+{
+  "symbol": "ETHUSDT",
+  "initial_balance": 10000.0,
+  "exchange": "binance",
+  "trade_mode": "dual",
+  "risk_percent": 0.02,
+  "strategy": "range_trend"
+}

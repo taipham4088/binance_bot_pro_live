@@ -1,0 +1,9 @@
+{
+  "trading_enabled": true,
+  "exchange": "binance",
+  "symbol": "BTCUSDT",
+  "mode": "paper",
+  "risk_percent": 0.01,
+  "trade_mode": "dual",
+  "strategy": "range_trend"
+}
