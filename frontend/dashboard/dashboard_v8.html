@@ -99,100 +99,179 @@
     <div id="v8_flow_breadcrumb" class="v8-flow-text mono">Signal → Decision → Order → Exchange → Fill</div>
   </div>
 
-  <!-- Row 2: PnL / Risk / Control -->
-  <section class="v8-row v8-row-3 v8-row-tall" aria-label="PnL risk control">
-    <article class="v8-card" id="v8-panel-pnl" data-v8-modes="live,shadow,paper,backtest">
-      <div class="v8-card-head">
-        <h2>PNL</h2>
-        <span class="v8-card-icon" aria-hidden="true">$</span>
-      </div>
-      <div id="backtest_progress" class="v8-backtest-progress">Backtest Idle</div>
-      <div id="pnl" class="v8-card-body"></div>
-    </article>
-    <article class="v8-card" id="v8-panel-risk" data-v8-modes="live,shadow">
-      <div class="v8-card-head">
-        <h2>RISK</h2>
-        <span class="v8-card-icon" aria-hidden="true">⛰</span>
-      </div>
-      <div id="risk" class="v8-card-body"></div>
-    </article>
-    <article class="v8-card v8-card-control" id="v8-panel-control" data-v8-modes="live,shadow,paper,backtest">
-      <div class="v8-card-head">
-        <h2>CONTROL PANEL</h2>
-        <div class="control-actions">
-          <button type="button" id="pause_btn" class="v8-btn v8-btn-warn" onclick="pauseBot()">Pause</button>
-          <button type="button" id="resume_btn" class="v8-btn v8-btn-go" onclick="resumeBot()">Resume</button>
+  <!-- Live/Shadow/Paper: PNL | RISK | CONTROL · Backtest: grid areas via IDs (no wrapper between layout and .v8-panel) -->
+  <div class="v8-pnl-risk-control-layout" role="region" aria-label="PnL risk control">
+    <div class="v8-panel" id="v8-panel-pnl" data-v8-modes="live,shadow,paper,backtest">
+      <article class="v8-card">
+        <div class="v8-card-head">
+          <h2>PNL</h2>
+          <span class="v8-card-icon" aria-hidden="true">$</span>
         </div>
-      </div>
-      <div class="control-panel v8-control-panel">
-        <div class="control-filter">
-          <input id="symbol_filter" type="text" placeholder="Filter symbol…" onkeyup="filterSymbols()">
-        </div>
-        <div class="control-row">
-          <label>Symbol</label>
-          <select id="symbol_select" onchange="pendingButton('symbol_select')"></select>
-          <button type="button" class="v8-btn v8-btn-blue" onclick="setSymbol(this)">Apply</button>
-        </div>
-        <div class="control-row">
-          <label>Exchange</label>
-          <select id="exchange_select" onchange="pendingButton('exchange_select')">
-            <option value="binance">BINANCE</option>
-            <option value="bybit">BYBIT</option>
-            <option value="okx">OKX</option>
-            <option value="paper">PAPER</option>
-          </select>
-          <button type="button" class="v8-btn v8-btn-blue" onclick="setExchange(this)">Apply</button>
-        </div>
-        <div class="control-row v8-risk-stepper">
-          <label>Risk (%)</label>
-          <div class="v8-stepper">
-            <button type="button" class="v8-btn v8-btn-ghost" onclick="adjustRisk(-0.1)">−</button>
-            <input id="risk_input" type="number" value="1" step="0.01" min="0" oninput="pendingButton('risk_input')">
-            <button type="button" class="v8-btn v8-btn-ghost" onclick="adjustRisk(0.1)">+</button>
-          </div>
-          <button type="button" class="v8-btn v8-btn-blue" onclick="setRisk(this)">Apply</button>
-        </div>
-        <div class="control-row">
-          <label>Initial Balance</label>
-          <input id="initial_balance" type="number" value="10000" step="1" oninput="pendingButton('initial_balance')">
-          <button type="button" id="apply_initial_balance" class="v8-btn v8-btn-blue">Apply</button>
-        </div>
-        <div class="control-row">
-          <label>Trade Mode</label>
-          <select id="trade_mode_select" onchange="pendingButton('trade_mode_select')">
-            <option value="dual">DUAL</option>
-            <option value="long">LONG</option>
-            <option value="short">SHORT</option>
-          </select>
-          <button type="button" class="v8-btn v8-btn-blue" onclick="setMode(this)">Apply</button>
-        </div>
-        <div class="control-row">
-          <label>Strategy</label>
-          <select id="strategy_select" onchange="pendingButton('strategy_select')">
-            <option value="range_trend">RANGE TREND</option>
-          </select>
-          <button type="button" class="v8-btn v8-btn-blue" onclick="setStrategy(this)">Apply</button>
-        </div>
-        <div class="v8-kill-row">
-          <button type="button" class="v8-btn v8-btn-kill" onclick="pauseBot()">Kill switch (pause trading)</button>
-        </div>
-      </div>
-    </article>
-  </section>
-
-  <!-- Backtest-only: full-width summary between control row and pipeline -->
-  <section
-    class="v8-card v8-backtest-summary-wrap"
-    id="v8-panel-backtest-summary"
-    data-v8-modes="backtest"
-    aria-label="Backtest summary"
-  >
-    <div class="v8-card-head">
-      <h2>BACKTEST SUMMARY</h2>
-      <span class="v8-card-icon" aria-hidden="true">◉</span>
+        <div id="backtest_progress" class="v8-backtest-progress">Backtest Idle</div>
+        <div id="pnl" class="v8-card-body"></div>
+      </article>
     </div>
-    <div id="v8_backtest_summary_root" class="v8-card-body v8-backtest-summary-body"></div>
-  </section>
+    <div class="v8-panel" id="v8-panel-risk" data-v8-modes="live,shadow,paper">
+      <article class="v8-card">
+        <div class="v8-card-head">
+          <h2>RISK</h2>
+          <span class="v8-card-icon" aria-hidden="true">⛰</span>
+        </div>
+        <div id="risk" class="v8-card-body"></div>
+      </article>
+    </div>
+    <div class="v8-panel" id="v8-panel-control" data-v8-modes="live,shadow,paper,backtest">
+      <article class="v8-card v8-card-control">
+        <div class="v8-card-head">
+          <h2>CONTROL PANEL</h2>
+          <div class="control-actions">
+            <button type="button" id="pause_btn" class="v8-btn v8-btn-warn" onclick="pauseBot()">Pause</button>
+            <button type="button" id="resume_btn" class="v8-btn v8-btn-go" onclick="resumeBot()">Resume</button>
+          </div>
+        </div>
+        <div class="control-panel v8-control-panel">
+          <div class="control-filter">
+            <input id="symbol_filter" type="text" placeholder="Filter symbol…" onkeyup="filterSymbols()">
+          </div>
+          <div class="control-row">
+            <label>Symbol</label>
+            <select id="symbol_select" onchange="pendingButton('symbol_select')"></select>
+            <button type="button" class="v8-btn v8-btn-blue" onclick="setSymbol(this)">Apply</button>
+          </div>
+          <div class="control-row">
+            <label>Exchange</label>
+            <select id="exchange_select" onchange="pendingButton('exchange_select')">
+              <option value="binance">BINANCE</option>
+              <option value="bybit">BYBIT</option>
+              <option value="okx">OKX</option>
+              <option value="paper">PAPER</option>
+            </select>
+            <button type="button" class="v8-btn v8-btn-blue" onclick="setExchange(this)">Apply</button>
+          </div>
+          <div class="control-row v8-risk-stepper">
+            <label>Risk (%)</label>
+            <div class="v8-stepper">
+              <button type="button" class="v8-btn v8-btn-ghost" onclick="adjustRisk(-0.1)">−</button>
+              <input id="risk_input" type="number" value="1" step="0.01" min="0" oninput="pendingButton('risk_input')">
+              <button type="button" class="v8-btn v8-btn-ghost" onclick="adjustRisk(0.1)">+</button>
+            </div>
+            <button type="button" class="v8-btn v8-btn-blue" onclick="setRisk(this)">Apply</button>
+          </div>
+          <div class="control-row">
+            <label>Initial Balance</label>
+            <input id="initial_balance" type="number" value="10000" step="1" oninput="pendingButton('initial_balance')">
+            <button type="button" id="apply_initial_balance" class="v8-btn v8-btn-blue">Apply</button>
+          </div>
+          <div class="control-row">
+            <label>Trade Mode</label>
+            <select id="trade_mode_select" onchange="pendingButton('trade_mode_select')">
+              <option value="dual">DUAL</option>
+              <option value="long">LONG</option>
+              <option value="short">SHORT</option>
+            </select>
+            <button type="button" class="v8-btn v8-btn-blue" onclick="setMode(this)">Apply</button>
+          </div>
+          <div class="control-row">
+            <label>Strategy</label>
+            <select id="strategy_select" onchange="pendingButton('strategy_select')">
+              <option value="range_trend">RANGE TREND</option>
+            </select>
+            <button type="button" class="v8-btn v8-btn-blue" onclick="setStrategy(this)">Apply</button>
+          </div>
+          <div class="v8-kill-row">
+            <button type="button" class="v8-btn v8-btn-kill" onclick="pauseBot()">Kill switch (pause trading)</button>
+          </div>
+        </div>
+      </article>
+    </div>
+  </div>
+
+  <!-- Backtest-only: Download | Summary (grid) -->
+  <div
+    class="v8-grid-2 v8-backtest-only"
+    data-v8-modes="backtest"
+    aria-label="Backtest download and summary"
+  >
+    <div class="v8-panel">
+      <section
+        class="v8-card v8-download-panel"
+        id="v8-panel-binance-download"
+        data-v8-modes="backtest"
+        aria-label="Download Binance data"
+      >
+        <div class="v8-card-head">
+          <h2>DOWNLOAD BINANCE DATA</h2>
+          <span class="v8-card-icon" aria-hidden="true">⬇</span>
+        </div>
+        <div class="v8-card-body v8-download-panel-body">
+          <p class="v8-muted v8-download-hint">
+            Binance mainnet klines — spot or USD-M futures (read-only). Files go to <span class="mono">data/import/</span>. Use Session → BACKTEST → Import with the path below.
+          </p>
+          <div class="control-row v8-download-row">
+            <label for="dl_exchange">Exchange</label>
+            <select id="dl_exchange">
+              <option value="binance">Binance</option>
+            </select>
+          </div>
+          <div class="control-row v8-download-row">
+            <label for="dl_market">Market</label>
+            <select id="dl_market">
+              <option value="futures" selected>Futures</option>
+              <option value="spot">Spot</option>
+            </select>
+          </div>
+          <div class="control-row v8-download-row">
+            <label for="dl_symbol">Symbol</label>
+            <select id="dl_symbol" class="v8-input-mono"></select>
+          </div>
+          <div class="control-row v8-download-row">
+            <label for="dl_interval">Interval</label>
+            <select id="dl_interval">
+              <option value="1m">1m</option>
+              <option value="3m">3m</option>
+              <option value="5m" selected>5m</option>
+              <option value="15m">15m</option>
+              <option value="30m">30m</option>
+              <option value="1h">1h</option>
+              <option value="4h">4h</option>
+              <option value="1d">1d</option>
+            </select>
+          </div>
+          <div class="control-row v8-download-row">
+            <label for="dl_start">Start</label>
+            <input type="date" id="dl_start" value="2024-01-01" />
+          </div>
+          <div class="control-row v8-download-row">
+            <label for="dl_end">End</label>
+            <input type="date" id="dl_end" value="2025-01-01" />
+          </div>
+          <div class="v8-download-actions">
+            <button type="button" id="btn_download" class="v8-btn v8-btn-blue">Download</button>
+          </div>
+          <div id="dl_file_preview" class="v8-download-preview mono" aria-live="polite"></div>
+          <div id="download_status" class="v8-download-status mono" aria-live="polite"></div>
+          <div class="v8-import-list-wrap">
+            <div class="v8-muted v8-import-list-title">Files in <span class="mono">data/import/</span></div>
+            <ul id="v8_data_import_list" class="v8-import-list mono"></ul>
+          </div>
+        </div>
+      </section>
+    </div>
+    <div class="v8-panel">
+      <section
+        class="v8-card v8-backtest-summary-wrap"
+        id="v8-panel-backtest-summary"
+        data-v8-modes="backtest"
+        aria-label="Backtest summary"
+      >
+        <div class="v8-card-head">
+          <h2>BACKTEST SUMMARY</h2>
+          <span class="v8-card-icon" aria-hidden="true">◉</span>
+        </div>
+        <div id="v8_backtest_summary_root" class="v8-card-body v8-backtest-summary-body"></div>
+      </section>
+    </div>
+  </div>
 
   <!-- Pipeline full width -->
   <section class="v8-card v8-pipeline-card" id="v8-panel-pipeline" data-v8-modes="live,shadow,paper,backtest">
@@ -216,7 +295,7 @@
           <div class="v8-card-head"><h2>SLIPPAGE</h2></div>
           <div id="slippage" class="v8-card-body"></div>
         </article>
-        <article class="v8-card" id="v8-panel-latency" data-v8-modes="live">
+        <article class="v8-card" id="v8-panel-latency" data-v8-modes="live,shadow">
           <div class="v8-card-head"><h2>LATENCY</h2></div>
           <div id="latency" class="v8-card-body"></div>
         </article>
@@ -288,7 +367,7 @@
       <div id="v8_pane_exec" class="v8-tab-pane" role="tabpanel" hidden>
         <div class="v8-exec-history-toolbar">
           <span class="v8-exec-history-toolbar-title">Execution History</span>
-          <button type="button" class="v8-btn v8-btn-ghost v8-btn-compact" id="v8_exec_history_clear_btn" onclick="clearV8ExecutionHistoryView()">Clear</button>
+          <button type="button" class="v8-btn v8-btn-ghost v8-btn-compact" id="v8_exec_history_clear_btn" onclick="clearExecutionHistory()">Clear</button>
         </div>
         <div class="v8-table-scroll table-scroll">
           <table id="execution_history_v8" class="v8-table v8-history-table v8-exec-history-table">

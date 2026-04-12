@@ -1,3 +1,4 @@
+import logging
 import threading
 import time
 from collections import deque
@@ -10,6 +11,8 @@ from backend.storage.mode_storage import mode_storage
 
 _ensure_execution_db_lock = threading.Lock()
 _initialized_execution_db_paths: set[str] = set()
+
+_logger = logging.getLogger(__name__)
 
 
 def _ensure_execution_history_schema(mode: str) -> None:
@@ -274,8 +277,12 @@ class ExecutionMonitor:
 
         if data and data.get("fill_price") is not None:
             self.history.append(data)
-            sid = resolve_session_id_from_call_stack()
-            mode = sid if sid else "shadow"
+            mode = resolve_session_id_from_call_stack()
+            if not mode:
+                _logger.warning(
+                    "execution session unresolved; skipping record_execution (no stack-bound session)"
+                )
+                return
             _ensure_execution_history_schema(mode)
             record_execution(data, mode=mode)
 

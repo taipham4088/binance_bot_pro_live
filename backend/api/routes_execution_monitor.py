@@ -1,9 +1,11 @@
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException, Query
 from backend.observability.execution_monitor_instance import execution_monitor
 import sqlite3
 import os
 
 router = APIRouter(prefix="/api/execution", tags=["execution"])
+
+_EXEC_CLEAR_ALLOWED = frozenset({"live", "shadow", "paper", "backtest"})
 
 
 @router.get("/monitor")
@@ -142,3 +144,39 @@ def execution_history(session: str | None = None, mode: str | None = None):
             "history": [],
             "message": str(e)
         }
+
+
+@router.post("/clear")
+def execution_history_clear(
+    session: str | None = Query(None),
+    mode: str | None = Query(None),
+):
+    """
+    Delete all rows from execution_history for the given session DB only
+    (same path as GET /api/execution/history).
+    """
+    from backend.storage.mode_storage import mode_storage
+
+    mode_key = (session or mode or "").strip().lower()
+    if not mode_key or mode_key not in _EXEC_CLEAR_ALLOWED:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid or missing session; allowed: {', '.join(sorted(_EXEC_CLEAR_ALLOWED))}",
+        )
+
+    db_path = mode_storage.get_execution_path(mode_key)
+    if not db_path or not os.path.exists(db_path):
+        return {"success": True}
+
+    try:
+        conn = sqlite3.connect(db_path)
+        try:
+            cur = conn.cursor()
+            cur.execute("DELETE FROM execution_history")
+            conn.commit()
+        finally:
+            conn.close()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e)) from e
+
+    return {"success": True}

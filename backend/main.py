@@ -33,7 +33,10 @@ from backend.runtime.runtime_config import runtime_config, runtime_config_path
 #analytics_bus.subscribe(trade_journal)
 app = FastAPI(title="binance_bot_pro_live")
 from backend.api.backtest import router as backtest_router
+from backend.api.data_download import router as data_download_router
+
 app.include_router(backtest_router)
+app.include_router(data_download_router)
 
 init_db()
 # =========================

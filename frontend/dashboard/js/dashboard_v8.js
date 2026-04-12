@@ -530,8 +530,22 @@ function resetV8DashboardLayout() {
   setV8HistoryTab("trades")
 }
 
-function applyDashboardModeVisibility() {
-  const m = (selectedDashboardSession || "live").toLowerCase()
+function getV8DashboardSessionMode() {
+  const s = String(selectedDashboardSession || "live").toLowerCase().trim()
+  return s || "live"
+}
+
+/**
+ * Show/hide panels by `data-v8-modes` for the active session (live | shadow | paper | backtest).
+ * @param {string} [mode] — optional; defaults to current `selectedDashboardSession`
+ */
+function applyDashboardModeVisibility(mode) {
+  const m =
+    mode != null && String(mode).trim() !== ""
+      ? String(mode).toLowerCase().trim()
+      : getV8DashboardSessionMode()
+  if (!m) return
+
   document.body.dataset.v8Session = m
   document.body.classList.toggle("v8-backtest-mode", m === "backtest")
   document.querySelectorAll("[data-v8-modes]").forEach((el) => {
@@ -543,9 +557,20 @@ function applyDashboardModeVisibility() {
       .filter(Boolean)
     const show = modes.includes(m)
     el.hidden = !show
+    if (show) {
+      el.style.removeProperty("display")
+    } else {
+      el.style.setProperty("display", "none", "important")
+    }
     el.setAttribute("aria-hidden", show ? "false" : "true")
   })
   applyV8PanelUserPrefs()
+  if (m === "backtest") {
+    void refreshV8DataImportList()
+  }
+  document
+    .querySelector(".v8-pnl-risk-control-layout")
+    ?.style.setProperty("display", "grid", "important")
 }
 
 function updateHeaderRunning() {
@@ -555,6 +580,7 @@ function updateHeaderRunning() {
   el.textContent = st
   el.classList.remove("running", "stopped", "unknown", "finished", "error")
   if (st === "RUNNING") el.classList.add("running")
+  else if (st === "READY") el.classList.add("running")
   else if (st === "STOPPED") el.classList.add("stopped")
   else if (st === "FINISHED") el.classList.add("finished")
   else if (st === "ERROR") el.classList.add("error")
@@ -597,6 +623,151 @@ function sessionControlStatus(msg, isError = false) {
   if (!el) return
   el.textContent = msg || ""
   el.style.color = isError ? "#f87171" : "#cbd5e1"
+}
+
+async function refreshV8DataImportList() {
+  const ul = document.getElementById("v8_data_import_list")
+  if (!ul) return
+  ul.innerHTML = ""
+  try {
+    const res = await fetch("/api/data/import-files")
+    if (!res.ok) return
+    const data = await res.json()
+    const files = Array.isArray(data.files) ? data.files : []
+    if (!files.length) {
+      const li = document.createElement("li")
+      li.textContent = "— (none yet)"
+      li.className = "muted"
+      ul.appendChild(li)
+      return
+    }
+    for (const entry of files) {
+      const p = typeof entry === "string" ? entry : entry.path || entry.name
+      const li = document.createElement("li")
+      li.textContent = p || "—"
+      ul.appendChild(li)
+    }
+  } catch {
+    /* ignore */
+  }
+}
+
+function updateFilePreview() {
+  const el = document.getElementById("dl_file_preview")
+  if (!el) return
+  const ex = document.getElementById("dl_exchange")?.value || "binance"
+  const market = document.getElementById("dl_market")?.value || "futures"
+  const sym = (document.getElementById("dl_symbol")?.value || "BTCUSDT").toUpperCase()
+  const iv = document.getElementById("dl_interval")?.value || "5m"
+  const s = document.getElementById("dl_start")?.value
+  const e = document.getElementById("dl_end")?.value
+  if (!s || !e) {
+    el.textContent = ""
+    return
+  }
+  const y1 = s.slice(0, 4)
+  const y2 = e.slice(0, 4)
+  const yearPart = y1 === y2 ? y1 : `${y1}_${y2}`
+  el.textContent = `${ex}_${market}_${sym}_${iv}_${yearPart}.csv`
+}
+
+function syncDlSymbolFromLiveSelect() {
+  const src = document.getElementById("symbol_select")
+  const dl = document.getElementById("dl_symbol")
+  if (!dl) return
+  const prev = dl.value
+  dl.innerHTML = ""
+  const fallback = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT"]
+  const list =
+    src && src.options && src.options.length > 0
+      ? Array.from(src.options).map((o) => ({ v: o.value, t: o.textContent || o.value }))
+      : fallback.map((x) => ({ v: x, t: x }))
+  list.forEach(({ v, t }) => {
+    const opt = document.createElement("option")
+    opt.value = v
+    opt.textContent = t
+    dl.appendChild(opt)
+  })
+  let pick = ""
+  if (src?.value && list.some((x) => x.v === src.value)) pick = src.value
+  else if (prev && list.some((x) => x.v === prev)) pick = prev
+  else if (list.length) pick = list[0].v
+  if (pick) dl.value = pick
+  updateFilePreview()
+}
+
+function initV8DownloadPanel() {
+  const ids = ["dl_exchange", "dl_market", "dl_symbol", "dl_interval", "dl_start", "dl_end"]
+  ids.forEach((id) => {
+    document.getElementById(id)?.addEventListener("change", updateFilePreview)
+    document.getElementById(id)?.addEventListener("input", updateFilePreview)
+  })
+  updateFilePreview()
+}
+
+async function downloadBinanceData() {
+  const statusEl = document.getElementById("download_status")
+  const exchange = document.getElementById("dl_exchange")?.value || "binance"
+  const market = document.getElementById("dl_market")?.value || "futures"
+  const symbol = document.getElementById("dl_symbol")?.value?.trim()
+  const interval = document.getElementById("dl_interval")?.value
+  const start = document.getElementById("dl_start")?.value
+  const end = document.getElementById("dl_end")?.value
+  if (!symbol || !interval || !start || !end) {
+    if (statusEl) {
+      statusEl.style.color = "#f87171"
+      statusEl.textContent = "Fill symbol, interval, start, and end."
+    }
+    return
+  }
+  if (statusEl) {
+    statusEl.style.color = ""
+    statusEl.textContent = "Downloading..."
+  }
+  try {
+    const res = await fetch("/api/data/download", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        exchange,
+        market,
+        symbol,
+        interval,
+        start_date: start,
+        end_date: end,
+      }),
+    })
+    const data = await res.json().catch(() => ({}))
+    if (!res.ok) {
+      const msg =
+        typeof data.detail === "string"
+          ? data.detail
+          : Array.isArray(data.detail)
+            ? data.detail.map((d) => d.msg || JSON.stringify(d)).join("; ")
+            : `HTTP ${res.status}`
+      if (statusEl) {
+        statusEl.style.color = "#f87171"
+        statusEl.textContent = "Download failed: " + msg
+      }
+      return
+    }
+    if (data.success) {
+      if (statusEl) {
+        statusEl.style.color = ""
+        statusEl.textContent =
+          "Download complete: " + (data.filename || data.path || data.file || "")
+      }
+      await refreshV8DataImportList()
+    } else if (statusEl) {
+      statusEl.style.color = "#f87171"
+      statusEl.textContent = "Download failed"
+    }
+  } catch (e) {
+    if (statusEl) {
+      statusEl.style.color = "#f87171"
+      statusEl.textContent = "Download failed: " + (e?.message || e)
+    }
+  }
 }
 
 function openSessionControl() {
@@ -1078,6 +1249,7 @@ async function refreshAfterLifecycleAction() {
 function normalizeSessionStatus(value) {
   const s = String(value || "").trim().toUpperCase()
   if (s === "RUNNING") return "RUNNING"
+  if (s === "READY") return "READY"
   if (s === "FINISHED") return "FINISHED"
   if (s === "ERROR") return "ERROR"
   if (s === "STOPPED" || s === "IDLE" || s === "CREATED") return "STOPPED"
@@ -1095,6 +1267,7 @@ function setSessionStatusEl(id, status) {
   }
   el.classList.remove("running", "stopped", "unknown", "finished", "error")
   if (text === "RUNNING") el.classList.add("running")
+  else if (text === "READY") el.classList.add("running")
   else if (text === "STOPPED") el.classList.add("stopped")
   else if (text === "FINISHED") el.classList.add("finished")
   else if (text === "ERROR") el.classList.add("error")
@@ -1103,21 +1276,41 @@ function setSessionStatusEl(id, status) {
 
 function readStatusFromSessionsPayload(payload, sessionId) {
   if (!payload) return "UNKNOWN"
+  const sid = String(sessionId || "").toLowerCase()
   if (Array.isArray(payload)) {
-    const row = payload.find((x) => String(x?.id || x?.session_id || "").toLowerCase() === sessionId)
+    const row = payload.find((x) => String(x?.id || x?.session_id || "").toLowerCase() === sid)
     return row?.status || "UNKNOWN"
   }
   if (Array.isArray(payload.sessions)) {
-    const row = payload.sessions.find((x) => String(x?.id || x?.session_id || "").toLowerCase() === sessionId)
+    const row = payload.sessions.find((x) => String(x?.id || x?.session_id || "").toLowerCase() === sid)
     return row?.status || "UNKNOWN"
   }
   if (payload.sessions && typeof payload.sessions === "object") {
-    const row = payload.sessions[sessionId]
+    const sess = payload.sessions
+    const row = sess[sid]
     if (row && typeof row === "object") return row.status || "UNKNOWN"
     if (typeof row === "string") return row
+    if (sid === "shadow") {
+      const ls = sess.live_shadow
+      if (ls && typeof ls === "object") return ls.status || "UNKNOWN"
+      for (const k of Object.keys(sess)) {
+        const ent = sess[k]
+        if (ent && typeof ent === "object" && String(ent.mode || "").toLowerCase() === "shadow") {
+          return ent.status || "UNKNOWN"
+        }
+      }
+    }
+    if (sid === "paper") {
+      for (const k of Object.keys(sess)) {
+        const ent = sess[k]
+        if (ent && typeof ent === "object" && String(ent.mode || "").toLowerCase() === "paper") {
+          return ent.status || "UNKNOWN"
+        }
+      }
+    }
   }
-  if (payload[sessionId] && typeof payload[sessionId] === "object") {
-    return payload[sessionId].status || "UNKNOWN"
+  if (payload[sid] && typeof payload[sid] === "object") {
+    return payload[sid].status || "UNKNOWN"
   }
   return "UNKNOWN"
 }
@@ -1217,7 +1410,7 @@ function hydrateSessionSelectorFromStorage() {
     dual.checked = savedDual
     dualPanelModeEnabled = dual.checked
   }
-  applyDashboardModeVisibility()
+  applyDashboardModeVisibility(selectedDashboardSession)
 }
 
 function resetBacktestPnL() {
@@ -1518,7 +1711,7 @@ async function onSessionSelectionChanged() {
   }
   try {
     await loadSessionConfig()
-    applyDashboardModeVisibility()
+    applyDashboardModeVisibility(selectedDashboardSession)
     // Full repaint lifecycle (same idea as bootstrap): always refetch dashboard + metrics for the new session.
     await loadDashboard()
     if (v8TradeScopedMode(sid) && useSessionMetrics) {
@@ -1605,7 +1798,7 @@ document.addEventListener("DOMContentLoaded", function(){
   }
   v8BootstrapAllTradeAnchors()
 
-  applyDashboardModeVisibility()
+  applyDashboardModeVisibility(getV8DashboardSessionMode())
   initV8PanelsDropdown()
   initV8HistoryTabs()
 
@@ -1613,7 +1806,7 @@ document.addEventListener("DOMContentLoaded", function(){
   ;(async function bootstrapDashboardControlPanel() {
     hydrateSessionSelectorFromStorage()
     // Hydration can change selectedDashboardSession; mode visibility was applied earlier with defaults.
-    applyDashboardModeVisibility()
+    applyDashboardModeVisibility(selectedDashboardSession)
     await loadSymbols()
     await loadDashboard()
     await new Promise(r => requestAnimationFrame(r))
@@ -1670,6 +1863,12 @@ document.addEventListener("DOMContentLoaded", function(){
     if (document.hidden) return
     prefetchOtherSessions()
   })
+
+  document.getElementById("btn_download")?.addEventListener("click", () => {
+    void downloadBinanceData()
+  })
+  initV8DownloadPanel()
+  syncDlSymbolFromLiveSelect()
 })
 
 function v8PaintDashboardPayload(data) {
@@ -3813,6 +4012,7 @@ select.appendChild(opt)
 }
 
 applySymbolSelectFromBaseline()
+  syncDlSymbolFromLiveSelect()
 
 }
 
@@ -3950,10 +4150,12 @@ function updateExecutionPipeline(data) {
   if (v8PanelHiddenById("v8-panel-pipeline")) return
   const root = data || {}
   const selectedStatus = sessionRuntimeStatus[selectedDashboardSession] || "UNKNOWN"
+  const pipelineSessionActive =
+    selectedStatus === "RUNNING" || selectedStatus === "READY"
   const steps = ["signal", "decision", "order", "exchange", "fill"]
   const meta = document.getElementById("v8_pipeline_meta")
 
-  if (!dualPanelModeEnabled && selectedStatus !== "RUNNING") {
+  if (!dualPanelModeEnabled && !pipelineSessionActive) {
     steps.forEach((s) => {
       const el = document.getElementById("p_" + s)
       if (!el) return
@@ -4033,12 +4235,47 @@ function v8ExecStatusField(t) {
   return v8Dash(t?.status)
 }
 
-/** Clears execution history table in the UI only; next poll refills from API. */
+/** Clears execution history table DOM (client state; pair with POST /api/execution/clear to wipe DB). */
 function clearV8ExecutionHistoryView() {
   const tbody = document.querySelector("#execution_history_v8 tbody")
   if (!tbody) return
   lastExecRowTimeSec = -1
   tbody.innerHTML = `<tr><td colspan="${V8_EXEC_HISTORY_COLS}" class="v8-table-placeholder">Cleared — view only; data reloads on next refresh</td></tr>`
+}
+
+/** Clears session-scoped execution_history SQLite + UI; polling will stay empty until new fills. */
+async function clearExecutionHistory() {
+  const sid = String(selectedDashboardSession || "live").toLowerCase()
+  if (!["live", "shadow", "paper", "backtest"].includes(sid)) {
+    if (typeof console !== "undefined" && console.warn) {
+      console.warn("[V8] execution clear: unsupported session", sid)
+    }
+    return
+  }
+  try {
+    const res = await fetch(`/api/execution/clear?session=${encodeURIComponent(sid)}`, {
+      method: "POST",
+    })
+    if (!res.ok) {
+      const t = await res.text()
+      if (typeof console !== "undefined" && console.warn) {
+        console.warn("[V8] execution clear failed", res.status, t)
+      }
+      return
+    }
+    executionHistoryRequestId += 1
+    executionHistory = []
+    lastExecution = []
+    lastExecRowTimeSec = -1
+    const tbody = document.querySelector("#execution_history_v8 tbody")
+    if (tbody) {
+      tbody.innerHTML = `<tr><td colspan="${V8_EXEC_HISTORY_COLS}" class="v8-table-placeholder">Execution history cleared</td></tr>`
+    }
+  } catch (e) {
+    if (typeof console !== "undefined" && console.warn) {
+      console.warn("[V8] execution clear", e)
+    }
+  }
 }
 
 /** Clears trade history: archive + backend reset for selected session, then UI + refresh. */
