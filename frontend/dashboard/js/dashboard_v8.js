@@ -16,6 +16,8 @@ let selectedDashboardSession = "live"
 const dashboardSessionCache = {}
 let dualPanelModeEnabled = false
 let dashboardRequestId = 0
+/** Bumped on backtest UI reset so in-flight /api/dashboard/metrics responses cannot overwrite cleared state. */
+let v8MetricsApplyToken = 0
 let lastPrefetchTime = 0
 const PREFETCH_COOLDOWN_MS = 15000
 let tradesRequestId = 0
@@ -62,6 +64,9 @@ const V8_POLL_DASH_MS = 2000
 const V8_POLL_TRADES_MS = 5000
 const V8_POLL_EXEC_MS = 5000
 const V8_POLL_METRICS_MS = 3000
+
+/** Set true temporarily to trace load → paint → metrics (verbose when metrics poll runs). */
+const V8_DEBUG_DASHBOARD_PAINT = false
 
 /** Persist session-metrics mode across reload / Stop→Start (only Clear sets; optional reset clears). */
 const V8_SESSION_METRICS_KEY = "dashboard_v8_session_metrics"
@@ -182,7 +187,14 @@ let sessionPnlLocked = {
   max_drawdown: 0,
 }
 
-let v8DashboardPaintRaf = null
+/** Table-only paints (trades/exec); must not cancel deterministic dashboard paint RAF. */
+let v8TablePaintRaf = null
+/** Coalesced full dashboard + metrics paint (loadDashboard, WS PnL path, poll, refresh, session). */
+let v8DeterministicPaintRaf = null
+let v8PendingUpdate = false
+let v8UpdateQueue = {}
+/** When set, v8PaintDashboardPayload is skipped if it no longer matches dashboardRequestId. */
+let v8QueuedDashboardRequestId = null
 /** Incremented on backtest hard reset to drop stale scheduled dashboard paints. */
 let v8PaintToken = 0
 
@@ -310,12 +322,83 @@ function execRowTimeSec(t) {
   return Number.isFinite(n) ? n : 0
 }
 
+function v8MergeDashboardPatch(base, patch) {
+  if (!patch || typeof patch !== "object") return base
+  if (!base || typeof base !== "object") return { ...patch }
+  const out = { ...base, ...patch }
+  if (patch.pnl != null || base.pnl != null) {
+    out.pnl = { ...(base.pnl || {}), ...(patch.pnl || {}) }
+  }
+  if (patch.metrics != null || base.metrics != null) {
+    out.metrics = { ...(base.metrics || {}), ...(patch.metrics || {}) }
+  }
+  if (patch.config != null || base.config != null) {
+    out.config = { ...(base.config || {}), ...(patch.config || {}) }
+  }
+  if (patch.risk_status != null || base.risk_status != null) {
+    out.risk_status = { ...(base.risk_status || {}), ...(patch.risk_status || {}) }
+  }
+  return out
+}
+
+function v8BuildMergedDashboardForPaint() {
+  const q = v8UpdateQueue
+  let merged = null
+  if (q.dashboard && typeof q.dashboard === "object") {
+    merged = v8MergeDashboardPatch(null, q.dashboard)
+  } else if (lastDashboardPayload) {
+    merged = { ...lastDashboardPayload }
+  }
+  if (q.refresh) merged = v8MergeDashboardPatch(merged, q.refresh)
+  if (q.ws) merged = v8MergeDashboardPatch(merged, q.ws)
+  return merged
+}
+
+/**
+ * Single coalesced paint: merges queued sources (dashboard / refresh / ws) then runs
+ * v8PaintDashboardPayload once per frame. Metrics-only ticks queue "metrics".
+ * Does not cancel prior RAF — later callers add to v8UpdateQueue before the same frame runs.
+ */
+function scheduleV8DeterministicPaint(source, payload) {
+  if (isBacktestHardReset() && (!backtestLifecycleRefresh || !backtestLifecycleReady)) return
+  v8UpdateQueue[source] = payload === undefined ? true : payload
+  if (v8PendingUpdate) return
+  v8PendingUpdate = true
+  const token = v8PaintToken
+  v8DeterministicPaintRaf = requestAnimationFrame(() => {
+    v8DeterministicPaintRaf = null
+    v8PendingUpdate = false
+    if (token !== v8PaintToken) {
+      for (const k of Object.keys(v8UpdateQueue)) delete v8UpdateQueue[k]
+      v8QueuedDashboardRequestId = null
+      return
+    }
+    const hadMetricsOnly = Boolean(v8UpdateQueue.metrics)
+    const hadAuxPaint =
+      hadMetricsOnly ||
+      Boolean(v8UpdateQueue.bootstrap || v8UpdateQueue.session)
+    const merged = v8BuildMergedDashboardForPaint()
+    const staleReq =
+      v8QueuedDashboardRequestId !== null &&
+      v8QueuedDashboardRequestId !== dashboardRequestId
+    v8QueuedDashboardRequestId = null
+    for (const k of Object.keys(v8UpdateQueue)) delete v8UpdateQueue[k]
+
+    if (merged && !staleReq) {
+      v8PaintDashboardPayload(merged)
+    } else if (hadAuxPaint || (merged && staleReq)) {
+      updateMetrics({})
+      updatePerformance(lastDashboardPayload || {})
+    }
+  })
+}
+
 function scheduleV8DashboardPaint(fn) {
   if (isBacktestHardReset() && (!backtestLifecycleRefresh || !backtestLifecycleReady)) return
-  if (v8DashboardPaintRaf != null) cancelAnimationFrame(v8DashboardPaintRaf)
+  if (v8TablePaintRaf != null) cancelAnimationFrame(v8TablePaintRaf)
   const token = v8PaintToken
-  v8DashboardPaintRaf = requestAnimationFrame(() => {
-    v8DashboardPaintRaf = null
+  v8TablePaintRaf = requestAnimationFrame(() => {
+    v8TablePaintRaf = null
     if (token !== v8PaintToken) return
     fn()
   })
@@ -937,8 +1020,14 @@ async function loadSessionConfig() {
   }
 }
 
-async function refreshAllPanels() {
-  if (isBacktestHardReset() && (!backtestLifecycleRefresh || !backtestLifecycleReady)) return
+async function refreshAllPanels(bypassBacktestHardResetGuard = false) {
+  if (
+    !bypassBacktestHardResetGuard &&
+    isBacktestHardReset() &&
+    (!backtestLifecycleRefresh || !backtestLifecycleReady)
+  ) {
+    return
+  }
   await loadDashboard()
   if (v8TradesHistoryPollActive()) await updateTrades(true)
   if (v8ExecHistoryPollActive()) await updateExecutionHistory()
@@ -951,11 +1040,10 @@ async function refreshAllPanels() {
       fetchJsonSafe(`/api/dashboard/risk-status?${qp}`),
     ])
 
-    scheduleV8DashboardPaint(() => {
-      if (v8SkipIfBacktestHardReset("refreshAllPanels")) return
-      updatePosition({ position })
-      updatePnL({ pnl })
-      updateRisk({ risk_status: risk, pnl })
+    scheduleV8DeterministicPaint("refresh", {
+      position,
+      pnl,
+      risk_status: risk,
     })
   } catch (_e) {
     /* partial refresh optional */
@@ -1083,15 +1171,19 @@ async function pollV8Metrics() {
   if (v8SessionMetricsActive()) {
     return
   }
+  const metricsToken = v8MetricsApplyToken
   try {
-    lastMetricsSummary = await fetchJsonSafe(
+    const fetched = await fetchJsonSafe(
       `/api/dashboard/metrics?${getSessionQueryParams()}`
     )
+    if (metricsToken !== v8MetricsApplyToken) return
+    lastMetricsSummary = fetched
   } catch (_e) {
+    if (metricsToken !== v8MetricsApplyToken) return
     lastMetricsSummary = null
   }
-  updateMetrics({})
-  updatePerformance(lastDashboardPayload || {})
+  if (metricsToken !== v8MetricsApplyToken) return
+  scheduleV8DeterministicPaint("metrics", true)
 }
 
 function hydrateSessionSelectorFromStorage() {
@@ -1169,6 +1261,17 @@ function v8IsNewBacktestRun(data) {
   return tradeTime > backtestResetTimestamp
 }
 
+/** Payload already carries backtest results; do not require trade time > backtestResetTimestamp (session switch). */
+function v8BacktestPayloadHasSummarySignals(data) {
+  const rt = data?.recent_trades
+  if (Array.isArray(rt) && rt.length > 0) return true
+  const tc = data?.pnl?.trade_count
+  if (tc != null && Number(tc) > 0) return true
+  const prog = data?.pnl?.backtest_progress
+  if (prog != null && Number.isFinite(Number(prog)) && Number(prog) > 0) return true
+  return false
+}
+
 /** True when payload indicates a backtest run worth painting (no backend `backtest_running` required). */
 function v8BacktestDashboardLooksStarted(data) {
   let ok = false
@@ -1235,6 +1338,8 @@ function v8BacktestDashboardLooksStarted(data) {
 function resetBacktestPanels() {
   backtestResetTimestamp = Date.now() / 1000
   v8PaintToken++
+  dashboardRequestId++
+  v8MetricsApplyToken++
   backtestUIHardReset = true
   backtestLifecycleReady = false
   backtestResetActive = true
@@ -1280,6 +1385,22 @@ function resetBacktestPanels() {
   lastExecRowTimeSec = -1
   v8TradeHistoryCleared = false
 
+  // reset session stats
+  sessionStats = {
+    trades: 0,
+    wins: 0,
+    losses: 0,
+    pnl: 0,
+    drawdown: 0,
+    profitFactor: 0,
+  }
+
+  // reset session pnl lock
+  sessionPnlLocked = {
+    realized_pnl: 0,
+    max_drawdown: 0,
+  }
+
   lastDashboardPayload = null
 }
 
@@ -1294,31 +1415,37 @@ async function onSessionSelectionChanged() {
   v8TradeHistoryCleared = false
   lastExecRowTimeSec = -1
   lastEquityChartKey = ""
-  if (selectedDashboardSession === "backtest") {
+  const sid = String(selectedDashboardSession || "").toLowerCase()
+  if (sid === "backtest") {
     backtestIdleMode = true
     resetBacktestPanels()
+    // Allow repaint after session switch (otherwise hard reset blocks paint/metrics/load until WS or failsafe).
+    backtestLifecycleReady = true
+    backtestLifecycleRefresh = true
     delete dashboardSessionCache["backtest"]
   }
-  await loadSessionConfig()
-  const cached = dashboardSessionCache[selectedDashboardSession]
-  if (cached) {
-    if (String(selectedDashboardSession).toLowerCase() === "backtest") {
-      resetBacktestPanels()
-      delete dashboardSessionCache["backtest"]
-      await loadDashboard()
-    } else {
-      lastDashboardPayload = cached
-      void refreshSessionStatuses()
-      scheduleV8DashboardPaint(() => {
-        v8PaintDashboardPayload(cached)
-      })
-    }
-  } else {
+  try {
+    await loadSessionConfig()
+    applyDashboardModeVisibility()
+    // Full repaint lifecycle (same idea as bootstrap): always refetch dashboard + metrics for the new session.
     await loadDashboard()
+    if (v8TradeScopedMode(sid) && useSessionMetrics) {
+      resetV8Metrics()
+    }
+    await pollV8Metrics()
+    await refreshAllPanels(true)
+    await new Promise((resolve) => requestAnimationFrame(() => resolve()))
+    scheduleV8DeterministicPaint("session", lastDashboardPayload ?? true)
+    requestAnimationFrame(() => {
+      backtestLifecycleRefresh = false
+      backtestLifecycleReady = false
+    })
+  } catch (_e) {
+    backtestLifecycleRefresh = false
+    backtestLifecycleReady = false
   }
   if (v8TradesHistoryPollActive()) await updateTrades(true)
   if (v8ExecHistoryPollActive()) await updateExecutionHistory()
-  applyDashboardModeVisibility()
 }
 
 function markControlApplyCommitted(elementId, value) {
@@ -1395,12 +1522,18 @@ document.addEventListener("DOMContentLoaded", function(){
   // Symbol list must exist before hydrating from /api/dashboard (avoids race → false “pending”).
   ;(async function bootstrapDashboardControlPanel() {
     hydrateSessionSelectorFromStorage()
+    // Hydration can change selectedDashboardSession; mode visibility was applied earlier with defaults.
+    applyDashboardModeVisibility()
     await loadSymbols()
     await loadDashboard()
+    await new Promise(r => requestAnimationFrame(r))
     if (useSessionMetrics) {
       resetV8Metrics()
     }
     await pollV8Metrics()
+    // One frame so layout/visibility (e.g. checkVisibility in pollV8Metrics) matches the painted DOM.
+    await new Promise((resolve) => requestAnimationFrame(() => resolve()))
+    scheduleV8DeterministicPaint("bootstrap", true)
     if (v8TradesHistoryPollActive()) await updateTrades(true)
     if (v8ExecHistoryPollActive()) await updateExecutionHistory()
   })()
@@ -1467,6 +1600,7 @@ function v8PaintDashboardPayload(data) {
     return
   }
   if (v8SkipIfBacktestHardReset("v8PaintDashboardPayload")) return
+  if (V8_DEBUG_DASHBOARD_PAINT) console.log("[V8] paint dashboard")
   syncMarketHeaderFromConfig(data.config)
 
   updatePosition(data)
@@ -1479,6 +1613,10 @@ function v8PaintDashboardPayload(data) {
 
   updateStrategy(data)
   updateMarketBias(data)
+
+  // FIX LIVE METRICS INITIAL PAINT
+  updateMetrics(data)
+  updatePerformance(data)
 
   if (data.config) {
     const paused = data.config.trading_enabled === false
@@ -1509,7 +1647,8 @@ function v8PaintDashboardPayload(data) {
     if (
       selectedDashboardSession === "backtest" &&
       backtestIdleMode &&
-      !v8IsNewBacktestRun(data)
+      !v8IsNewBacktestRun(data) &&
+      !v8BacktestPayloadHasSummarySignals(data)
     ) {
       return
     }
@@ -1635,10 +1774,9 @@ if (
 lastDashboardPayload = data
 dashboardSessionCache[selectedDashboardSession] = data
 
-scheduleV8DashboardPaint(() => {
-  if (requestId !== dashboardRequestId) return
-  v8PaintDashboardPayload(data)
-})
+if (V8_DEBUG_DASHBOARD_PAINT) console.log("[V8] loadDashboard paint")
+v8QueuedDashboardRequestId = requestId
+scheduleV8DeterministicPaint("dashboard", data)
 
 prefetchOtherSessions()
 
@@ -1911,18 +2049,16 @@ if(data?.observability?.execution_monitor){
 updateExecution(data)
 }
 
-// PNL + risk + metrics + backtest summary (repaint only; progress runs below always)
-if(!isHardReset){
-if(data.pnl){
-updatePnL(data)
-}
-if(data.pnl || data.risk_status){
-updateRisk(data)
-}
-updateMetrics(data)
-if (String(selectedDashboardSession || "").toLowerCase() === "backtest") {
-  updateBacktestSummary(data)
-}
+// PnL / risk / metrics / backtest summary: coalesce (skip noise ticks that only carry e.g. market)
+if (
+  !isHardReset &&
+  (data.pnl != null ||
+    data.risk_status != null ||
+    data.metrics != null ||
+    (Array.isArray(data.recent_trades) && data.recent_trades.length > 0) ||
+    data.backtest_running != null)
+) {
+  scheduleV8DeterministicPaint("ws", data)
 }
 
 // PIPELINE
@@ -1947,7 +2083,21 @@ updateBacktestProgressDisplay(data)
 }
 }
 
+function updateClearButtonState(data) {
+  const btn = document.getElementById("clear-history-btn")
+  if (!btn) return
+  const pos = data?.position ?? lastDashboardPayload?.position
+  const raw = pos?.size ?? lastDashboardPayload?.position_size ?? 0
+  const n = Number(raw)
+  const open = Number.isFinite(n) && Math.abs(n) > 0
+  btn.disabled = open
+  btn.title = open
+    ? "Close position before clearing trade history"
+    : ""
+}
+
 function updatePosition(data) {
+  updateClearButtonState(data)
   if (v8PanelHiddenById("v8-panel-position")) return
   const p = data?.position
   const el = document.getElementById("position")
@@ -2123,12 +2273,97 @@ function v8ComputeWinLossStreaksFromTrades(trades) {
   return { maxWin: maxW > 0 ? maxW : null, maxLoss: maxL > 0 ? maxL : null }
 }
 
+/** Journal-derived metrics when SQLite-backed metrics lag behind in-memory trades (fallback only). */
+function v8ComputeMetricsFromTrades(trades) {
+  if (!Array.isArray(trades) || !trades.length) return null
+
+  let wins = 0
+  let losses = 0
+  let grossWin = 0
+  let grossLoss = 0
+
+  let maxWinStreak = 0
+  let maxLossStreak = 0
+  let winStreak = 0
+  let lossStreak = 0
+
+  let longTrades = 0
+  let shortTrades = 0
+
+  for (const t of trades) {
+    const su = String(t?.side ?? "").toUpperCase()
+    if (su === "LONG" || su === "BUY") longTrades += 1
+    else if (su === "SHORT" || su === "SELL") shortTrades += 1
+
+    const raw = v8BacktestTradePnl(t)
+    if (raw == null) continue
+    const pnl = Number(raw)
+    if (!Number.isFinite(pnl)) continue
+
+    if (pnl > 0) {
+      wins += 1
+      grossWin += pnl
+      winStreak += 1
+      lossStreak = 0
+    } else if (pnl < 0) {
+      losses += 1
+      grossLoss += Math.abs(pnl)
+      lossStreak += 1
+      winStreak = 0
+    } else {
+      winStreak = 0
+      lossStreak = 0
+    }
+
+    maxWinStreak = Math.max(maxWinStreak, winStreak)
+    maxLossStreak = Math.max(maxLossStreak, lossStreak)
+  }
+
+  const total = wins + losses
+  if (total === 0) return null
+
+  const avgWin = wins ? grossWin / wins : 0
+  const avgLoss = losses ? grossLoss / losses : 0
+
+  const winRate = total ? wins / total : 0
+  const profitFactor = grossLoss > 0 ? grossWin / grossLoss : null
+
+  const expectancy = winRate * avgWin - (1 - winRate) * avgLoss
+
+  return {
+    win_rate: winRate,
+    avg_win: avgWin,
+    avg_loss: -avgLoss,
+    profit_factor: profitFactor,
+    expectancy,
+    max_win_streak: maxWinStreak > 0 ? maxWinStreak : null,
+    max_loss_streak: maxLossStreak > 0 ? maxLossStreak : null,
+    long_trades: longTrades,
+    short_trades: shortTrades,
+    total_trades: total,
+  }
+}
+
 function computeBacktestSummary(trades) {
-  if (selectedDashboardSession === "backtest" && backtestResetActive) {
+  const t = Array.isArray(trades) ? trades : []
+  if (selectedDashboardSession === "backtest" && backtestResetActive && t.length === 0) {
     return null
   }
   if (isBacktestHardReset()) return null
-  return v8ComputeWinLossStreaksFromTrades(trades)
+  return v8ComputeWinLossStreaksFromTrades(t)
+}
+
+/** Merge dashboard keys that may carry post-finish backtest stats (metrics poll uses same shape). */
+function v8MergeBacktestSummaryMetricSources(data) {
+  const box = (x) => (x && typeof x === "object" && !Array.isArray(x) ? x : {})
+  return {
+    ...(lastMetricsSummary || {}),
+    ...box(data?.performance),
+    ...box(data?.metrics),
+    ...box(data?.summary),
+    ...box(data?.pnl?.metrics),
+    ...box(data?.backtest_summary),
+  }
 }
 
 function v8BtSumRow(label, value) {
@@ -2139,10 +2374,14 @@ function v8BtSumRow(label, value) {
 
 function updateBacktestSummary(data) {
   if (!data) return
+  if (String(selectedDashboardSession || "").toLowerCase() !== "backtest") return
+  const payloadSession = v8PayloadSessionHint(data)
+  if (payloadSession && payloadSession !== "backtest") return
   if (
     selectedDashboardSession === "backtest" &&
     backtestIdleMode &&
-    !v8IsNewBacktestRun(data)
+    !v8IsNewBacktestRun(data) &&
+    !v8BacktestPayloadHasSummarySignals(data)
   ) {
     return
   }
@@ -2151,17 +2390,25 @@ function updateBacktestSummary(data) {
     data.recent_trades.length > 0 &&
     (selectedDashboardSession !== "backtest" ||
       !backtestResetActive ||
-      v8BacktestDashboardLooksStarted(data))
+      v8BacktestDashboardLooksStarted(data) ||
+      v8BacktestPayloadHasSummarySignals(data))
   ) {
-    if (!backtestIdleMode || selectedDashboardSession !== "backtest") {
+    if (
+      !backtestIdleMode ||
+      selectedDashboardSession !== "backtest" ||
+      v8BacktestPayloadHasSummarySignals(data)
+    ) {
       recentTrades = data.recent_trades
     }
   }
 
+  const tradesFromPayload = Array.isArray(data?.recent_trades) ? data.recent_trades : []
   if (
     selectedDashboardSession === "backtest" &&
     backtestResetActive &&
-    (!recentTrades || recentTrades.length === 0)
+    (!recentTrades || recentTrades.length === 0) &&
+    tradesFromPayload.length === 0 &&
+    !v8BacktestPayloadHasSummarySignals(data)
   ) {
     return
   }
@@ -2170,12 +2417,28 @@ function updateBacktestSummary(data) {
   if (!root) return
   const cfg = data?.config || {}
   const pnl = data?.pnl || {}
-  const metrics = {
-    ...(lastMetricsSummary || {}),
-    ...(data?.metrics && typeof data.metrics === "object" ? data.metrics : {}),
+  const trades =
+    Array.isArray(data?.recent_trades) && data.recent_trades.length > 0
+      ? data.recent_trades
+      : Array.isArray(recentTrades) && recentTrades.length > 0
+        ? recentTrades
+        : []
+
+  let metrics = v8MergeBacktestSummaryMetricSources(data)
+  const journalN = trades.length
+  const mt = Number(metrics?.total_trades)
+  const wrN = Number(metrics?.win_rate)
+  const pnlN = Number(pnl.trade_count)
+  const metricsWinRateMissing = !Number.isFinite(wrN)
+  const metricsEmptyVersusJournal =
+    journalN > 0 &&
+    (!Number.isFinite(mt) || mt === 0 || (Number.isFinite(pnlN) && pnlN > 0 && pnlN > mt))
+  if (journalN > 0 && (metricsWinRateMissing || metricsEmptyVersusJournal)) {
+    const derived = v8ComputeMetricsFromTrades(trades)
+    if (derived) metrics = { ...metrics, ...derived }
   }
+
   const risk = data?.risk_status || {}
-  const trades = Array.isArray(data?.recent_trades) ? data.recent_trades : []
 
   const sym = pnl.symbol || cfg.symbol || "—"
   const tf = cfg.test_timeframe || cfg.timeframe || "—"
@@ -2197,22 +2460,30 @@ function updateBacktestSummary(data) {
     totalTrades = String(trades.length)
   }
 
-  const wr = Number(metrics.win_rate)
+  let wr = Number(metrics.win_rate ?? metrics.winRate)
+  if (Number.isFinite(wr) && wr > 1 && wr <= 100) wr = wr / 100
   const wrStr = Number.isFinite(wr) ? `${(wr * 100).toFixed(1)}%` : "—"
-  const pf = metrics.profit_factor
+  const pf = metrics.profit_factor ?? metrics.profitFactor
   const pfStr =
     pf != null && Number.isFinite(Number(pf)) ? formatNumber(Number(pf)) : "—"
 
-  const avgWin = Number(metrics.avg_win)
-  const avgLoss = Number(metrics.avg_loss)
+  const avgWin = Number(metrics.avg_win ?? metrics.avgWin)
+  const avgLoss = Number(metrics.avg_loss ?? metrics.avgLoss)
   let expectancy = "—"
-  if (Number.isFinite(wr) && Number.isFinite(avgWin) && Number.isFinite(avgLoss)) {
+  const expM = metrics.expectancy ?? metrics.expectancy_dollars ?? metrics.expectancyDollars
+  if (expM != null && Number.isFinite(Number(expM))) {
+    expectancy = formatCurrency(Number(expM))
+  } else if (Number.isFinite(wr) && Number.isFinite(avgWin) && Number.isFinite(avgLoss)) {
     const e = wr * avgWin + (1 - wr) * avgLoss
     expectancy = Number.isFinite(e) ? formatCurrency(e) : "—"
   }
 
   const streakPack = computeBacktestSummary(trades) || { maxWin: null, maxLoss: null }
-  const { maxWin, maxLoss } = streakPack
+  let { maxWin, maxLoss } = streakPack
+  const mws = metrics.max_win_streak ?? metrics.maxWinStreak
+  const mls = metrics.max_loss_streak ?? metrics.maxLossStreak
+  if (mws != null && Number.isFinite(Number(mws))) maxWin = Number(mws)
+  if (mls != null && Number.isFinite(Number(mls))) maxLoss = Number(mls)
   const maxWinStr = maxWin != null ? String(maxWin) : "—"
   const maxLossStr = maxLoss != null ? String(maxLoss) : "—"
 
@@ -2237,7 +2508,14 @@ function updateBacktestSummary(data) {
   const alStr =
     Number.isFinite(avgLoss) && avgLoss !== 0 ? formatCurrency(avgLoss) : "—"
   let rr = "—"
-  if (Number.isFinite(avgWin) && Number.isFinite(avgLoss) && avgLoss !== 0) {
+  const rrM =
+    metrics.risk_reward ??
+    metrics.risk_reward_ratio ??
+    metrics.riskReward ??
+    metrics.rr
+  if (rrM != null && Number.isFinite(Number(rrM))) {
+    rr = formatNumber(Number(rrM))
+  } else if (Number.isFinite(avgWin) && Number.isFinite(avgLoss) && avgLoss !== 0) {
     const ratio = avgWin / Math.abs(avgLoss)
     rr = Number.isFinite(ratio) ? formatNumber(ratio) : "—"
   }
@@ -2261,7 +2539,10 @@ function updateBacktestSummary(data) {
   }
 
   let recoveryStr = "—"
-  if (maxDdDollars != null && maxDdDollars > 1e-9) {
+  const rfMetric = metrics.recovery_factor ?? metrics.recoveryFactor
+  if (rfMetric != null && Number.isFinite(Number(rfMetric))) {
+    recoveryStr = formatNumber(Number(rfMetric))
+  } else if (maxDdDollars != null && maxDdDollars > 1e-9) {
     const rf = netProfit / maxDdDollars
     recoveryStr = Number.isFinite(rf) ? formatNumber(rf) : "—"
   } else if (Number.isFinite(netProfit) && netProfit !== 0 && (maxDdDollars == null || maxDdDollars <= 1e-9)) {
@@ -2283,15 +2564,27 @@ function updateBacktestSummary(data) {
     tradesPerDayStr = "—"
   }
 
+  const ltM = metrics.long_trades ?? metrics.long_count ?? metrics.longCount
+  const stM = metrics.short_trades ?? metrics.short_count ?? metrics.shortCount
+  const distFromMetrics =
+    ltM != null &&
+    stM != null &&
+    Number.isFinite(Number(ltM)) &&
+    Number.isFinite(Number(stM))
   let longCt = 0
   let shortCt = 0
-  for (const t of trades) {
-    const side = String(t?.side ?? "").toUpperCase()
-    if (side === "LONG" || side === "BUY") longCt += 1
-    else if (side === "SHORT" || side === "SELL") shortCt += 1
+  if (distFromMetrics) {
+    longCt = Number(ltM)
+    shortCt = Number(stM)
+  } else {
+    for (const t of trades) {
+      const side = String(t?.side ?? "").toUpperCase()
+      if (side === "LONG" || side === "BUY") longCt += 1
+      else if (side === "SHORT" || side === "SELL") shortCt += 1
+    }
   }
-  const longStr = trades.length ? String(longCt) : "—"
-  const shortStr = trades.length ? String(shortCt) : "—"
+  const longStr = distFromMetrics || trades.length ? String(longCt) : "—"
+  const shortStr = distFromMetrics || trades.length ? String(shortCt) : "—"
 
   root.innerHTML = `
     <div class="v8-backtest-summary-grid">
@@ -2444,17 +2737,25 @@ function updateAccountBalanceOnly(data) {
 }
 
 function updatePnL(data) {
+  const sel = String(selectedDashboardSession || "").toLowerCase()
+  const payHint = v8PayloadSessionHint(data)
+  if (payHint && sel === "backtest" && payHint !== "backtest") return
+  if (payHint && sel !== "backtest" && payHint === "backtest") return
   if (
     selectedDashboardSession === "backtest" &&
     backtestIdleMode &&
-    !v8IsNewBacktestRun(data)
+    !v8IsNewBacktestRun(data) &&
+    !v8BacktestPayloadHasSummarySignals(data)
   ) {
     return
   }
+  const tradesFromPayloadPnl = Array.isArray(data?.recent_trades) ? data.recent_trades : []
   if (
     String(selectedDashboardSession || "").toLowerCase() === "backtest" &&
     backtestResetActive &&
-    (!recentTrades || recentTrades.length === 0)
+    (!recentTrades || recentTrades.length === 0) &&
+    tradesFromPayloadPnl.length === 0 &&
+    !v8BacktestPayloadHasSummarySignals(data)
   ) {
     return
   }
@@ -2543,6 +2844,7 @@ function updatePnL(data) {
 }
 
 function updateMetrics(data) {
+  if (V8_DEBUG_DASHBOARD_PAINT) console.log("[V8] updateMetrics triggered")
   if (v8SkipIfBacktestHardReset("updateMetrics")) return
   if (v8SessionMetricsActive()) return
   if (v8PanelHiddenById("v8-panel-metrics")) return
@@ -2989,6 +3291,7 @@ function updateStrategy(data) {
 }
 
 function updatePerformance(data) {
+  if (V8_DEBUG_DASHBOARD_PAINT) console.log("[V8] updatePerformance triggered")
   if (v8SkipIfBacktestHardReset("updatePerformance")) return
   if (v8SessionMetricsActive()) return
   if (v8PanelHiddenById("v8-panel-performance")) return
@@ -3417,10 +3720,41 @@ function clearV8ExecutionHistoryView() {
   tbody.innerHTML = `<tr><td colspan="${V8_EXEC_HISTORY_COLS}" class="v8-table-placeholder">Cleared — view only; data reloads on next refresh</td></tr>`
 }
 
-/** Clears trade history table in the UI only; use F5 or session change for a full reload. */
-function clearV8TradeHistoryView() {
+/** Clears trade history: archive + backend reset for selected session, then UI + refresh. */
+async function clearV8TradeHistoryView() {
   const tbody = document.querySelector("#trade_history_v8 tbody")
   if (!tbody) return
+
+  const guardRaw =
+    lastDashboardPayload?.position?.size ?? lastDashboardPayload?.position_size ?? 0
+  const guardSize = Number(guardRaw)
+  if (Number.isFinite(guardSize) && Math.abs(guardSize) > 0) {
+    alert(
+      "Cannot clear history while position is open.\n" +
+        "Please close position or wait for TP/SL before clearing."
+    )
+    return
+  }
+
+  const sid = String(selectedDashboardSession || "live").toLowerCase()
+  try {
+    const ar = await fetch(`/api/session/archive?session=${encodeURIComponent(sid)}`, {
+      method: "POST",
+    })
+    if (!ar.ok && typeof console !== "undefined" && console.warn) {
+      console.warn("[V8] session archive failed", ar.status)
+    }
+    const rs = await fetch(`/api/session/reset?session=${encodeURIComponent(sid)}`, {
+      method: "POST",
+    })
+    if (!rs.ok && typeof console !== "undefined" && console.warn) {
+      console.warn("[V8] session reset failed", rs.status)
+    }
+  } catch (e) {
+    if (typeof console !== "undefined" && console.warn) {
+      console.warn("[V8] clear history backend:", e)
+    }
+  }
   resetV8Metrics()
   clearV8ExecutionHistoryView()
   useSessionMetrics = true
@@ -3448,6 +3782,8 @@ function clearV8TradeHistoryView() {
     resetBacktestPanels()
     delete dashboardSessionCache["backtest"]
   }
+  await loadDashboard()
+  await pollV8Metrics()
 }
 
 /** Exit session-metrics mode and resume server-backed metrics (optional; e.g. console or future control). */

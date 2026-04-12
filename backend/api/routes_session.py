@@ -363,3 +363,39 @@ async def session_control_restart(req: Request, payload: dict = Body(...)):
         session.status = "RUNNING"
 
     return {"status": "restarted", "mode": session.mode, "session_status": session.status}
+
+
+@router.post("/archive")
+async def session_archive_trades(
+    req: Request,
+    session: str = Query(..., description="live | shadow | paper | backtest | live_shadow"),
+):
+    """Append closed trades from the session DB into data/archive/trades_archive.db (no delete)."""
+    from backend.services.session_trade_archive import archive_session_trades
+
+    try:
+        return archive_session_trades(session)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+
+@router.post("/reset")
+async def session_reset_trades_endpoint(
+    req: Request,
+    session: str = Query(..., description="live | shadow | paper | backtest | live_shadow"),
+):
+    """Truncate closed trades for one session runtime DB; refresh dashboard analytics cache."""
+    from backend.services.session_trade_archive import reset_session_trades_db
+
+    try:
+        out = reset_session_trades_db(session, req.app.state)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+    dc = req.app.state.dashboard_cache
+    dc.invalidate_session_analytics(session)
+    try:
+        dc.refresh()
+    except Exception:
+        pass
+    return out

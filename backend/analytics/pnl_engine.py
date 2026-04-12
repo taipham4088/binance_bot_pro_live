@@ -1,4 +1,7 @@
+import os
 import sqlite3
+
+from backend.storage.mode_storage import mode_storage
 
 
 class PnLEngine:
@@ -11,10 +14,20 @@ class PnLEngine:
     - drawdown
     """
 
-    def __init__(self, db_path="data/trades.db", start_balance=10000):
+    def __init__(self, db_path=None, session=None, start_balance=10000):
 
-        self.db_path = db_path
+        if db_path is not None:
+            path = db_path
+        elif session is not None:
+            path = mode_storage.get_session_trade_path(str(session))
+        else:
+            path = mode_storage.get_session_trade_path("live")
+
+        self.db_path = path
         self.start_balance = start_balance
+        d = os.path.dirname(path)
+        if d:
+            os.makedirs(d, exist_ok=True)
 
         self.conn = sqlite3.connect(self.db_path, check_same_thread=False)
 
@@ -29,13 +42,16 @@ class PnLEngine:
 
         cursor = self.conn.cursor()
 
-        cursor.execute(
-            """
-            SELECT pnl
-            FROM trades
-            ORDER BY trade_id ASC
-            """
-        )
+        try:
+            cursor.execute(
+                """
+                SELECT pnl
+                FROM trades
+                ORDER BY trade_id ASC
+                """
+            )
+        except sqlite3.OperationalError:
+            return []
 
         rows = cursor.fetchall()
 

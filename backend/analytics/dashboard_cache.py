@@ -5,6 +5,8 @@ from backend.runtime.exchange_config import exchange_config
 from backend.utils.symbol_utils import extract_quote_asset
 from backend.analytics.market_bias_engine import market_bias_engine
 from backend.runtime.runtime_config import runtime_config
+from backend.storage.mode_storage import mode_storage
+from backend.analytics.metrics_engine import MetricsEngine
 
 class DashboardCache:
     """
@@ -35,6 +37,7 @@ class DashboardCache:
         # sẽ được gắn từ FastAPI app
         self.app_state = None
         self._float_entry_by_session: dict[str, float] = {}
+        self._metrics_engine_by_session: dict[str, MetricsEngine] = {}
 
     # -------------------------
     # Session helpers
@@ -422,6 +425,20 @@ class DashboardCache:
             return "live"
         return str(session_id).strip().lower()
 
+    def invalidate_session_analytics(self, session_id: str | None) -> None:
+        """Drop cached MetricsEngine after archive/reset so the next read reopens the DB."""
+        sid = self._normalize_session_id(session_id)
+        self._metrics_engine_by_session.pop(sid, None)
+
+    def _metrics_summary_for_session_db(self, session_id: str) -> dict:
+        sid = self._normalize_session_id(session_id)
+        path = mode_storage.get_session_trade_path(sid)
+        eng = self._metrics_engine_by_session.get(sid)
+        if eng is None or getattr(eng, "db_path", None) != path:
+            eng = MetricsEngine(db_path=path)
+            self._metrics_engine_by_session[sid] = eng
+        return eng.summary()
+
     @staticmethod
     def _mode_matches_session(mode: str | None, session_id: str) -> bool:
         if not mode:
@@ -473,6 +490,7 @@ class DashboardCache:
             pnl["mode"] = "MULTI" if len(selected_panels) > 1 else (selected_panels[0].get("mode") if selected_panels else None)
             out["position"] = self._blank_position()
             out["risk_status"] = self._blank_risk_status("live_shadow")
+            out["metrics"] = self._metrics_summary_for_session_db("live")
             return out
 
         panel = None
@@ -555,6 +573,7 @@ class DashboardCache:
             except Exception:
                 pass
 
+        out["metrics"] = self._metrics_summary_for_session_db(target)
         return out
 
     # -------------------------

@@ -1,55 +1,169 @@
+# ================================
+
 # Python
-__pycache__/
+
+# ================================
+
+**pycache**/
+*.py[cod]
+*$py.class
+
+# Virtual Environment
+
+venv/
+env/
+.venv/
+ENV/
+env.bak/
+venv.bak/
+
+# Python Distribution
+
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# ================================
+
+# Bytecode / Cache
+
+# ================================
+
 *.pyc
 *.pyo
 *.pyd
+*.so
 
-# Virtual env
-venv/
-.venv/
-env/
-
-# Runtime data
-data/debug/
-data/session_meta/
+# ================================
 
 # Logs
+
+# ================================
+
 *.log
+logs/
+log/
 
-# Environment
-.env
+# ================================
 
-# OS
+# Runtime / Temp Files
+
+# ================================
+
+*.tmp
+*.temp
+*.swp
+*.swo
+
+# ================================
+
+# Database (Optional)
+
+# ================================
+
+# Runtime databases (ignore session db)
+
+data/session/*.db
+data/session/*.sqlite
+
+# Keep archive db tracked (optional)
+
+# data/archive/*.db
+
+# SQLite temp files
+
+*.sqlite-journal
+*.sqlite-wal
+*.sqlite-shm
+
+# ================================
+
+# OS Files
+
+# ================================
+
+# Mac
+
 .DS_Store
+
+# Windows
+
 Thumbs.db
+desktop.ini
 
-# Backtest outputs
-*.csv
+# ================================
 
-# Debug export
-data/debug/*
-!data/debug/.gitkeep
+# IDE
 
-# SQLite DB runtime
-*.db
-*.sqlite
-
-# Session runtime
-data/live/
-data/shadow/
-data/live_shadow/
+# ================================
 
 # VSCode
+
 .vscode/
 
 # PyCharm
+
 .idea/
 
-# Session config (new multi-session control panel)
-data/sessions/
+# JetBrains
 
-# Runtime config (local only)
-data/runtime_config.json
+*.iml
 
-# Python cache (backend nested)
-backend/**/__pycache__/
+# ================================
+
+# Testing / Coverage
+
+# ================================
+
+.coverage
+htmlcov/
+.pytest_cache/
+
+# ================================
+
+# Node (if frontend tooling added later)
+
+# ================================
+
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# ================================
+
+# Backup Files
+
+# ================================
+
+*.bak
+*.backup
+*.old
+
+# ================================
+
+# Trading System Specific
+
+# ================================
+
+# Runtime cache
+
+cache/
+runtime/
+
+# Backtest temporary files
+
+backtest/tmp/
+backtest/cache/
+
+# Generated reports
+
+reports/
+exports/
+
+# Local config (if exists)
+
+config.local.json
+.env
+.env.local

@@ -1,4 +1,7 @@
+import os
 import sqlite3
+
+from backend.storage.mode_storage import mode_storage
 
 
 class MetricsEngine:
@@ -12,9 +15,19 @@ class MetricsEngine:
     - profit_factor
     """
 
-    def __init__(self, db_path="data/trades.db"):
+    def __init__(self, db_path=None, session=None):
 
-        self.db_path = db_path
+        if db_path is not None:
+            path = db_path
+        elif session is not None:
+            path = mode_storage.get_session_trade_path(str(session))
+        else:
+            path = mode_storage.get_session_trade_path("live")
+
+        self.db_path = path
+        d = os.path.dirname(path)
+        if d:
+            os.makedirs(d, exist_ok=True)
 
         self.conn = sqlite3.connect(self.db_path, check_same_thread=False)
 
@@ -22,12 +35,15 @@ class MetricsEngine:
 
         cursor = self.conn.cursor()
 
-        cursor.execute(
-            """
-            SELECT pnl
-            FROM trades
-            """
-        )
+        try:
+            cursor.execute(
+                """
+                SELECT pnl
+                FROM trades
+                """
+            )
+        except sqlite3.OperationalError:
+            return []
 
         rows = cursor.fetchall()
 
