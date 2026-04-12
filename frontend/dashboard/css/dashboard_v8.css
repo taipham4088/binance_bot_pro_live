@@ -345,6 +345,12 @@ body[data-v8-session="backtest"] .v8-obs-row-a {
   min-width: 0;
 }
 
+#v8-panel-trades .v8-table-scroll,
+#v8-panel-trades .table-scroll {
+  will-change: transform;
+  contain: content;
+}
+
 #v8-panel-trades {
   grid-column: 1 / -1;
   width: 100%;
@@ -557,6 +563,8 @@ body[data-v8-session="backtest"] .v8-obs-row-a {
 .v8-chart-wrap {
   position: relative;
   height: 160px;
+  will-change: transform;
+  contain: content;
 }
 
 .v8-equity-card .v8-chart-wrap {
@@ -844,6 +852,24 @@ body[data-v8-session="backtest"] .v8-obs-row-a {
   background: #1d6ae0;
 }
 
+.session-control .session-row button.v8-btn-start.active {
+  background: #16c784;
+  color: #fff;
+  border-color: rgba(22, 199, 132, 0.55);
+}
+
+.session-control .session-row button.v8-btn-stop.active {
+  background: #ea3943;
+  color: #fff;
+  border-color: rgba(234, 57, 67, 0.55);
+}
+
+.session-control .session-row button.v8-btn-restart.active {
+  background: #f7931a;
+  color: #fff;
+  border-color: rgba(247, 147, 26, 0.55);
+}
+
 .session-control-status {
   margin-top: 10px;
   min-height: 20px;
@@ -914,21 +940,23 @@ body[data-v8-session="backtest"] .v8-obs-row-a {
   display: inline-flex;
 }
 
-/* History tables: fixed layout, compact type, horizontal scroll via parent */
+/* History tables: trade + execution — centered, even columns, horizontal scroll via parent */
 .v8-history-table {
   table-layout: fixed;
   width: 100%;
-  min-width: 940px;
+  min-width: 100%;
   font-size: 12px;
 }
 
 .v8-history-table th,
 .v8-history-table td {
+  width: auto;
+  text-align: center;
+  vertical-align: middle;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  padding: 8px 10px;
-  vertical-align: middle;
+  padding: 8px 6px;
 }
 
 .v8-history-table th {
@@ -937,103 +965,56 @@ body[data-v8-session="backtest"] .v8-obs-row-a {
   z-index: 1;
   background: rgba(18, 20, 26, 0.98);
   font-size: 10px;
+  font-weight: 600;
+  opacity: 0.85;
   letter-spacing: 0.06em;
+  padding: 8px 6px;
 }
 
-/* Trade history columns */
-#trades.v8-history-table th:nth-child(1),
-#trades.v8-history-table td:nth-child(1) {
-  width: 150px;
-  text-align: left;
-}
-
-#trades.v8-history-table th:nth-child(2),
-#trades.v8-history-table td:nth-child(2) {
-  width: 70px;
-  text-align: center;
-}
-
-#trades.v8-history-table th:nth-child(3),
-#trades.v8-history-table td:nth-child(3) {
-  width: 90px;
-  text-align: right;
-}
-
-#trades.v8-history-table th:nth-child(4),
-#trades.v8-history-table td:nth-child(4) {
-  width: 110px;
-  text-align: right;
-}
-
-#trades.v8-history-table th:nth-child(5),
-#trades.v8-history-table td:nth-child(5) {
-  width: 110px;
-  text-align: right;
-}
-
-#trades.v8-history-table th:nth-child(6),
-#trades.v8-history-table td:nth-child(6) {
-  width: 100px;
-  text-align: right;
-}
-
-#trades.v8-history-table th:nth-child(7),
-#trades.v8-history-table td:nth-child(7) {
-  width: 90px;
-  text-align: right;
-}
-
-#trades.v8-history-table th:nth-child(8),
-#trades.v8-history-table td:nth-child(8) {
-  width: 120px;
-  text-align: center;
-}
-
-#trades.v8-history-table th:nth-child(9),
-#trades.v8-history-table td:nth-child(9) {
-  width: 90px;
-  text-align: center;
-}
-
-/* Execution history columns (aligned with trade table rhythm) */
-#execution_history_v8.v8-history-table th:nth-child(1),
-#execution_history_v8.v8-history-table td:nth-child(1) {
-  width: 150px;
-  text-align: left;
-}
-
-#execution_history_v8.v8-history-table th:nth-child(2),
-#execution_history_v8.v8-history-table td:nth-child(2) {
-  width: 120px;
-  text-align: center;
-}
-
-#execution_history_v8.v8-history-table th:nth-child(3),
-#execution_history_v8.v8-history-table td:nth-child(3) {
-  width: 200px;
-  text-align: left;
-}
-
-#execution_history_v8.v8-history-table th:nth-child(4),
-#execution_history_v8.v8-history-table td:nth-child(4) {
-  width: 110px;
-  text-align: right;
-}
-
-#execution_history_v8.v8-history-table th:nth-child(5),
-#execution_history_v8.v8-history-table td:nth-child(5) {
-  width: 100px;
-  text-align: right;
-}
-
-#execution_history_v8.v8-history-table th:nth-child(6),
-#execution_history_v8.v8-history-table td:nth-child(6) {
-  width: 90px;
-  text-align: center;
+#trade_history_v8.v8-history-table {
+  min-width: 720px;
 }
 
 #execution_history_v8.v8-history-table {
-  min-width: 780px;
+  min-width: 960px;
+}
+
+.v8-trade-history-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+  flex-wrap: wrap;
+}
+
+.v8-trade-history-title {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  color: var(--v8-muted);
+}
+
+/* Execution history — full observability grid */
+.v8-exec-history-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+  flex-wrap: wrap;
+}
+
+.v8-exec-history-toolbar-title {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  color: var(--v8-muted);
+}
+
+.v8-btn-compact {
+  padding: 4px 10px;
+  font-size: 11px;
 }
 
 .v8-cell-dim {
@@ -1042,6 +1023,13 @@ body[data-v8-session="backtest"] .v8-obs-row-a {
 }
 
 .v8-table-placeholder {
+  text-align: center;
+  color: var(--v8-muted);
+  font-size: 12px;
+  padding: 20px 12px !important;
+}
+
+.v8-empty {
   text-align: center;
   color: var(--v8-muted);
   font-size: 12px;

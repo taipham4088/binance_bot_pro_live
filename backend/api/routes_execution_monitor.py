@@ -80,17 +80,22 @@ def execution_history(session: str | None = None, mode: str | None = None):
         cursor = conn.cursor()
 
         cursor.execute("""
-        SELECT 
-        time,
-        mode,
-        symbol,
-        strategy,
-        side,
-        size,
-        fill_price,
-        fee,
-        slippage,
-        latency
+        SELECT
+            time,
+            mode,
+            symbol,
+            strategy,
+            side,
+            size,
+            signal_price,
+            order_price,
+            fill_price,
+            fee,
+            slippage,
+            latency,
+            status,
+            step,
+            order_id
         FROM execution_history
         ORDER BY id DESC
         LIMIT 50
@@ -103,19 +108,26 @@ def execution_history(session: str | None = None, mode: str | None = None):
         history = []
 
         for r in rows:
-
-            lat = r[9]
+            row_time_ms = r[0]
+            ts_sec = int(row_time_ms / 1000) if row_time_ms is not None else None
+            lat = r[11]
             history.append({
-                "time": int(r[0] / 1000),
+                "time": ts_sec,
+                "timestamp": ts_sec,
                 "mode": r[1],
                 "symbol": r[2],
                 "strategy": r[3],
                 "side": r[4],
                 "size": r[5],
-                "fill_price": r[6],
-                "fee": r[7],
-                "slippage": r[8],
-                "latency": round(lat, 2) if lat is not None else 0
+                "signal_price": r[6],
+                "order_price": r[7],
+                "fill_price": r[8],
+                "fee": r[9],
+                "slippage": r[10],
+                "latency": round(lat, 2) if lat is not None else 0,
+                "status": r[12],
+                "step": r[13],
+                "order_id": r[14],
             })
 
         return {

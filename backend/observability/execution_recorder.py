@@ -32,18 +32,32 @@ def init_db(mode="shadow"):
         size REAL,
 
         signal_price REAL,
+        order_price REAL,
         fill_price REAL,
         fee REAL,
 
         slippage REAL,
-        latency REAL
+        latency REAL,
+
+        status TEXT,
+        step TEXT,
+        order_id TEXT
     )
     """)
 
     cursor.execute("PRAGMA table_info(execution_history)")
-    columns = [c[1] for c in cursor.fetchall()]
-    if "fee" not in columns:
-        cursor.execute("ALTER TABLE execution_history ADD COLUMN fee REAL")
+    columns = {c[1] for c in cursor.fetchall()}
+    migrations = [
+        ("fee", "ALTER TABLE execution_history ADD COLUMN fee REAL"),
+        ("order_price", "ALTER TABLE execution_history ADD COLUMN order_price REAL"),
+        ("status", "ALTER TABLE execution_history ADD COLUMN status TEXT"),
+        ("step", "ALTER TABLE execution_history ADD COLUMN step TEXT"),
+        ("order_id", "ALTER TABLE execution_history ADD COLUMN order_id TEXT"),
+    ]
+    for col, ddl in migrations:
+        if col not in columns:
+            cursor.execute(ddl)
+            columns.add(col)
 
     conn.commit()
     conn.close()
@@ -92,6 +106,15 @@ def record_execution(trace, mode="shadow"):
         if latency is None:
             latency = 0
 
+        row_time_ms = trace.get("event_time_ms")
+        if row_time_ms is None:
+            row_time_ms = int(time.time() * 1000)
+        else:
+            try:
+                row_time_ms = int(row_time_ms)
+            except (TypeError, ValueError):
+                row_time_ms = int(time.time() * 1000)
+
         conn = sqlite3.connect(db_path)
         cursor = conn.cursor()
 
@@ -104,40 +127,39 @@ def record_execution(trace, mode="shadow"):
 
         cursor.execute("""
         INSERT INTO execution_history (
-
             mode,
             symbol,
             strategy,
-
             time,
             side,
             size,
-
             signal_price,
+            order_price,
             fill_price,
             fee,
-
             slippage,
-            latency
-
+            latency,
+            status,
+            step,
+            order_id
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
-
             mode,
             trace.get("symbol"),
             trace.get("strategy"),
-
-            int(time.time() * 1000),
+            row_time_ms,
             trace.get("side"),
             trace.get("size"),
-
             trace.get("signal_price"),
+            trace.get("order_price"),
             trace.get("fill_price"),
             fee,
-
             trace.get("slippage"),
-            latency
+            latency,
+            trace.get("status"),
+            trace.get("step"),
+            trace.get("order_id"),
         ))
 
         conn.commit()

@@ -38,10 +38,138 @@ const V8_USER_PANEL_IDS = [
   "v8-exec-history-ui",
 ]
 
+const V8_HISTORY_MAX_ROWS = 50
+const V8_TRADE_HISTORY_COLS = 9
+const V8_EXEC_HISTORY_COLS = 12
+const V8_POLL_DASH_MS = 2000
+const V8_POLL_TRADES_MS = 5000
+const V8_POLL_EXEC_MS = 5000
+const V8_POLL_METRICS_MS = 3000
+
+/** Persist session-metrics mode across reload / Stop→Start (only Clear sets; optional reset clears). */
+const V8_SESSION_METRICS_KEY = "dashboard_v8_session_metrics"
+
+/** Last dashboard JSON for panels that need pnl without re-fetching. */
+let lastDashboardPayload = null
+
+/** Incremental trade history watermark (unix seconds); reset on load / session / clear. */
+let lastTradeRowTimeSec = 0
+/** After Clear, skip trade polls until a forced reload (e.g. F5 bootstrap or session change). */
+let v8TradeHistoryCleared = false
+let lastExecRowTimeSec = -1
+
+/** Avoid Chart.js work when equity series unchanged. */
+let lastEquityChartKey = ""
+
+/** Dashboard modes that share trade-history anchoring and session-metrics UX (not backtest). */
+const V8_TRADE_SCOPED_MODES = ["live", "paper", "shadow"]
+
+/** Per-mode unix seconds: trades at/after this time show for that session (start + uptime bootstrap). */
+let sessionTradeStartSec = {
+  live: 0,
+  paper: 0,
+  shadow: 0,
+}
+
+function v8TradeScopedMode(session) {
+  return V8_TRADE_SCOPED_MODES.includes(String(session || "").toLowerCase())
+}
+
+function v8SessionMetricsActive() {
+  return useSessionMetrics && v8TradeScopedMode(selectedDashboardSession)
+}
+
+function v8ActiveSessionTradeAnchor() {
+  const s = String(selectedDashboardSession || "").toLowerCase()
+  if (!v8TradeScopedMode(s)) return 0
+  return Number(sessionTradeStartSec[s]) || 0
+}
+
+function v8BootstrapAllTradeAnchors() {
+  const t = Math.floor(Date.now() / 1000)
+  for (const k of V8_TRADE_SCOPED_MODES) {
+    sessionTradeStartSec[k] = t
+  }
+}
+
+/** Client-side session counters (reset with Clear Trade History for strategy testing). */
+let sessionStats = {
+  trades: 0,
+  wins: 0,
+  losses: 0,
+  pnl: 0,
+  drawdown: 0,
+  profitFactor: 0,
+}
+
+/** After Clear Trade History: keep metrics/PnL/performance on session zeros (live/paper/shadow); persisted in localStorage. */
+let useSessionMetrics = false
+
+/** Frozen journal lines while session metrics active; equity/float/total still follow server `pnl`. */
+let sessionPnlLocked = {
+  realized_pnl: 0,
+  max_drawdown: 0,
+}
+
+let v8DashboardPaintRaf = null
+
 function v8Dash(v) {
   if (v === null || v === undefined || v === "") return "—"
   if (typeof v === "number" && Number.isNaN(v)) return "—"
   return String(v)
+}
+
+function formatCurrency(val) {
+  if (val == null || val === "") return "—"
+  const n = Number(val)
+  if (Number.isNaN(n) || !Number.isFinite(n)) return "—"
+  return n.toFixed(2)
+}
+
+function formatNumber(val) {
+  return formatCurrency(val)
+}
+
+/** RAM use as percent for display (expects 0–100 style value). */
+function formatMemory(mem) {
+  if (mem == null || mem === "") return "—"
+  const n = Number(mem)
+  if (!Number.isFinite(n)) return "—"
+  return `${n.toFixed(1)}%`
+}
+
+/** Dashboard `system` block: supports `memory`, `mem_percent`, or `mem_mb` (fallback). */
+function formatSystemMemoryDisplay(sys) {
+  if (!sys) return "—"
+  const pctRaw =
+    sys.memory != null && sys.memory !== ""
+      ? sys.memory
+      : sys.mem_percent != null && sys.mem_percent !== ""
+        ? sys.mem_percent
+        : null
+  if (pctRaw != null && Number.isFinite(Number(pctRaw))) {
+    return formatMemory(pctRaw)
+  }
+  const mb = sys.mem_mb
+  if (mb != null && Number.isFinite(Number(mb))) {
+    return `${Number(mb).toFixed(0)} MB`
+  }
+  return "—"
+}
+
+/**
+ * Session modal: highlight which Start / Stop / Restart was last clicked (per row).
+ * @param {"start"|"stop"|"restart"} state
+ * @param {HTMLElement} sessionRow
+ */
+function setControlButtonState(state, sessionRow) {
+  if (!sessionRow) return
+  sessionRow
+    .querySelectorAll("button.v8-btn-start, button.v8-btn-stop, button.v8-btn-restart")
+    .forEach((b) => b.classList.remove("active"))
+  if (state === "start") sessionRow.querySelector(".v8-btn-start")?.classList.add("active")
+  else if (state === "stop") sessionRow.querySelector(".v8-btn-stop")?.classList.add("active")
+  else if (state === "restart") sessionRow.querySelector(".v8-btn-restart")?.classList.add("active")
 }
 
 /** Unix seconds (API trade / execution rows) → DD-MM-YYYY HH:mm */
@@ -74,6 +202,47 @@ function saveV8PanelHiddenSet(set) {
     V8_PANEL_STORAGE_KEY,
     JSON.stringify({ hidden: [...set] })
   )
+}
+
+function v8PanelHiddenById(id) {
+  const el = document.getElementById(id)
+  if (!el || el.classList.contains("hidden-panel")) return true
+  if (typeof el.checkVisibility === "function") {
+    return !el.checkVisibility({ checkOpacity: false, checkVisibilityCSS: true })
+  }
+  return false
+}
+
+function v8TradesHistoryPollActive() {
+  return !v8PanelHiddenById("v8-panel-trades")
+}
+
+function v8ExecHistoryPollActive() {
+  if (!v8TradesHistoryPollActive()) return false
+  if (v8PanelHiddenById("v8-exec-history-ui")) return false
+  const pane = document.getElementById("v8_pane_exec")
+  const tab = document.getElementById("v8_tab_exec")
+  return Boolean(tab?.classList.contains("v8-tab-active") && pane && !pane.hidden)
+}
+
+function tradeRowTimeSec(t) {
+  const v = t?.time ?? t?.timestamp ?? t?.exit_time
+  const n = Number(v)
+  return Number.isFinite(n) ? n : 0
+}
+
+function execRowTimeSec(t) {
+  const v = t?.timestamp ?? t?.time
+  const n = Number(v)
+  return Number.isFinite(n) ? n : 0
+}
+
+function scheduleV8DashboardPaint(fn) {
+  if (v8DashboardPaintRaf != null) cancelAnimationFrame(v8DashboardPaintRaf)
+  v8DashboardPaintRaf = requestAnimationFrame(() => {
+    v8DashboardPaintRaf = null
+    fn()
+  })
 }
 
 function applyV8PanelUserPrefs() {
@@ -164,6 +333,9 @@ function setV8HistoryTab(which) {
   if (paneE) {
     paneE.hidden = trades
   }
+  if (w === "exec" && v8ExecHistoryPollActive()) {
+    updateExecutionHistory()
+  }
 }
 
 function initV8HistoryTabs() {
@@ -173,6 +345,10 @@ function initV8HistoryTabs() {
 
 function resetV8DashboardLayout() {
   localStorage.removeItem(V8_PANEL_STORAGE_KEY)
+  lastTradeRowTimeSec = 0
+  v8TradeHistoryCleared = false
+  lastExecRowTimeSec = -1
+  lastEquityChartKey = ""
   V8_USER_PANEL_IDS.forEach((id) => {
     document.getElementById(id)?.classList.remove("hidden-panel")
   })
@@ -286,6 +462,17 @@ document.addEventListener("click", async (e) => {
   const t = e.target
   const session = t.dataset?.session
   const action = t.dataset?.action
+
+  if (
+    session &&
+    action &&
+    (action === "start" || action === "stop" || action === "restart") &&
+    t.matches?.("button.v8-btn-start, button.v8-btn-stop, button.v8-btn-restart")
+  ) {
+    const row = t.closest(".session-row")
+    if (row) setControlButtonState(action, row)
+  }
+
   if (!session || !action) return
 
   const sid = String(session).toLowerCase()
@@ -365,6 +552,12 @@ document.addEventListener("click", async (e) => {
       await refreshSessionStatuses()
       return
     }
+    const sidLc = String(sid || "").toLowerCase()
+    if (v8TradeScopedMode(sidLc) && action === "start") {
+      sessionTradeStartSec[sidLc] = Math.floor(Date.now() / 1000)
+      lastTradeRowTimeSec = 0
+      v8TradeHistoryCleared = false
+    }
     sessionControlStatus(`${action.toUpperCase()} ${sid.toUpperCase()} ok`)
     await refreshSessionStatuses()
     await refreshAfterLifecycleAction()
@@ -423,6 +616,12 @@ async function sessionAction(sessionId, action, btn) {
     } else {
       throw new Error(`Unsupported action: ${action}`)
     }
+    const sessionLc = String(sessionId || "").toLowerCase()
+    if (v8TradeScopedMode(sessionLc) && action === "start") {
+      sessionTradeStartSec[sessionLc] = Math.floor(Date.now() / 1000)
+      lastTradeRowTimeSec = 0
+      v8TradeHistoryCleared = false
+    }
     sessionControlStatus(`${action.toUpperCase()} ${sessionId.toUpperCase()} success`)
     await refreshSessionStatuses()
     await refreshAfterLifecycleAction()
@@ -464,8 +663,6 @@ async function exportCandle(session) {
     )
     const data = await res.json()
     if (data.ok) {
-      console.log("[EXPORT]", data)
-      console.log(`[CANDLE EXPORT] ${sid} ${data.rows} bars`)
       sessionControlStatus(
         `[CANDLE EXPORT] ${sid} ${data.rows} bars → ${data.path}`,
         false
@@ -660,8 +857,8 @@ async function loadSessionConfig() {
 
 async function refreshAllPanels() {
   await loadDashboard()
-  await updateTrades()
-  await updateExecutionHistory()
+  if (v8TradesHistoryPollActive()) await updateTrades(true)
+  if (v8ExecHistoryPollActive()) await updateExecutionHistory()
 
   const qp = getSessionQueryParams()
   try {
@@ -671,11 +868,13 @@ async function refreshAllPanels() {
       fetchJsonSafe(`/api/dashboard/risk-status?${qp}`),
     ])
 
-    updatePosition({ position })
-    updatePnL({ pnl })
-    updateRisk({ risk_status: risk, pnl })
-  } catch (e) {
-    console.log("refreshAllPanels partial refresh error", e)
+    scheduleV8DashboardPaint(() => {
+      updatePosition({ position })
+      updatePnL({ pnl })
+      updateRisk({ risk_status: risk, pnl })
+    })
+  } catch (_e) {
+    /* partial refresh optional */
   }
 }
 
@@ -783,6 +982,27 @@ function getExecutionHistoryQueryParams() {
   return params.toString()
 }
 
+async function pollV8Metrics() {
+  if (
+    v8PanelHiddenById("v8-panel-metrics") &&
+    v8PanelHiddenById("v8-panel-performance")
+  ) {
+    return
+  }
+  if (v8SessionMetricsActive()) {
+    return
+  }
+  try {
+    lastMetricsSummary = await fetchJsonSafe(
+      `/api/dashboard/metrics?${getSessionQueryParams()}`
+    )
+  } catch (_e) {
+    lastMetricsSummary = null
+  }
+  updateMetrics({})
+  updatePerformance(lastDashboardPayload || {})
+}
+
 function hydrateSessionSelectorFromStorage() {
   const savedSession = (localStorage.getItem("dashboard-session") || "live").toLowerCase()
   const savedDual = localStorage.getItem("dashboard-dual-panel") === "1"
@@ -812,10 +1032,14 @@ async function onSessionSelectionChanged() {
   dualPanelModeEnabled = dual ? dual.checked === true : false
   localStorage.setItem("dashboard-session", selectedDashboardSession)
   localStorage.setItem("dashboard-dual-panel", dualPanelModeEnabled ? "1" : "0")
+  lastTradeRowTimeSec = 0
+  v8TradeHistoryCleared = false
+  lastExecRowTimeSec = -1
+  lastEquityChartKey = ""
   await loadSessionConfig()
   await loadDashboard()
-  await updateTrades()
-  await updateExecutionHistory()
+  if (v8TradesHistoryPollActive()) await updateTrades(true)
+  if (v8ExecHistoryPollActive()) await updateExecutionHistory()
   applyDashboardModeVisibility()
 }
 
@@ -879,6 +1103,13 @@ function applySymbolSelectFromBaseline() {
 
 document.addEventListener("DOMContentLoaded", function(){
 
+  lastTradeRowTimeSec = 0
+  v8TradeHistoryCleared = false
+  if (localStorage.getItem(V8_SESSION_METRICS_KEY) === "true") {
+    useSessionMetrics = true
+  }
+  v8BootstrapAllTradeAnchors()
+
   applyDashboardModeVisibility()
   initV8PanelsDropdown()
   initV8HistoryTabs()
@@ -888,14 +1119,22 @@ document.addEventListener("DOMContentLoaded", function(){
     hydrateSessionSelectorFromStorage()
     await loadSymbols()
     await loadDashboard()
-    await updateTrades()
-    await updateExecutionHistory()
+    if (useSessionMetrics) {
+      resetV8Metrics()
+    }
+    await pollV8Metrics()
+    if (v8TradesHistoryPollActive()) await updateTrades(true)
+    if (v8ExecHistoryPollActive()) await updateExecutionHistory()
   })()
 
-  // nếu bạn CHƯA chuyển hẳn sang WebSocket thì giữ polling
-  setInterval(loadDashboard,3000)
-  setInterval(updateTrades,3000)
-  setInterval(updateExecutionHistory,5000)
+  setInterval(loadDashboard, V8_POLL_DASH_MS)
+  setInterval(() => {
+    if (v8TradesHistoryPollActive()) updateTrades()
+  }, V8_POLL_TRADES_MS)
+  setInterval(() => {
+    if (v8ExecHistoryPollActive()) updateExecutionHistory()
+  }, V8_POLL_EXEC_MS)
+  setInterval(pollV8Metrics, V8_POLL_METRICS_MS)
 
   // nếu đã dùng WS realtime thì có thể bật:
   initWebSocket()
@@ -934,61 +1173,58 @@ const requestId = ++dashboardRequestId
 await refreshSessionStatuses()
 updateHeaderRunning()
 
-try {
-  lastMetricsSummary = await fetchJsonSafe(`/api/dashboard/metrics?${getSessionQueryParams()}`)
-} catch (_e) {
-  lastMetricsSummary = null
-}
-
 const res = await fetch(`/api/dashboard?${getSessionQueryParams()}`)
 
 if(!res.ok) return
 
 const data = await res.json()
 if(requestId !== dashboardRequestId) return
-console.log("dashboard data:",data)
 
 if(!data) return
 
-syncMarketHeaderFromConfig(data.config)
+lastDashboardPayload = data
 
-updatePosition(data)
-updatePnL(data)
-updateTrades()
+scheduleV8DashboardPaint(() => {
+  if (requestId !== dashboardRequestId) return
+  syncMarketHeaderFromConfig(data.config)
 
-updateSystem(data)
-updateExecution(data)
-updateRisk(data)
-updateReconciliation(data)
+  updatePosition(data)
+  updatePnL(data)
 
-updateStrategy(data)
-updateMarketBias(data)
-updateMetrics(data)
-updatePerformance(data)
-// Pause / Resume only (global trading_enabled — not session control fields)
-if(data.config){
+  updateSystem(data)
+  updateExecution(data)
+  updateRisk(data)
+  updateReconciliation(data)
 
-const paused = data.config.trading_enabled === false
+  updateStrategy(data)
+  updateMarketBias(data)
 
-if(paused){
+  if (data.config) {
+    const paused = data.config.trading_enabled === false
+    const pauseBtn = document.getElementById("pause_btn")
+    const resumeBtn = document.getElementById("resume_btn")
+    if (pauseBtn && resumeBtn) {
+      if (paused) {
+        pauseBtn.style.background = "#ef4444"
+        pauseBtn.style.color = "#fff"
+        resumeBtn.style.background = ""
+        resumeBtn.style.color = ""
+      } else {
+        resumeBtn.style.background = "#22c55e"
+        resumeBtn.style.color = "#000"
+        pauseBtn.style.background = ""
+        pauseBtn.style.color = ""
+      }
+    }
+  }
 
-document.getElementById("pause_btn").style.background = "#ef4444"
-document.getElementById("pause_btn").style.color = "#fff"
-
-document.getElementById("resume_btn").style.background = ""
-document.getElementById("resume_btn").style.color = ""
-
-}else{
-
-document.getElementById("resume_btn").style.background = "#22c55e"
-document.getElementById("resume_btn").style.color = "#000"
-
-document.getElementById("pause_btn").style.background = ""
-document.getElementById("pause_btn").style.color = ""
-
-}
-
-}
+  updateSlippage(data)
+  updateLatency(data)
+  updateAlerts(data)
+  updateExecutionPipeline(data)
+  updateV8PipelineBreadcrumb(data)
+  updateOrderLifecycle(data)
+})
 
 await loadSessionConfig()
 
@@ -999,18 +1235,8 @@ controlPanelBaselineReady = true
 refreshControlApplyButtonStates()
 }
 
-updateSlippage(data)
-updateLatency(data)
-updateAlerts(data)
-updateExecutionPipeline(data)
-updateV8PipelineBreadcrumb(data)
-updateExecutionHistory()
-updateOrderLifecycle(data)
-
 }catch(e){
-
-console.log("dashboard error", e)
-
+/* dashboard refresh failed */
 }
 
 }
@@ -1234,9 +1460,7 @@ const ws = new WebSocket(
 `ws://127.0.0.1:8000/ws/state/${session_id}`
 )
 
-ws.onopen = () => {
-console.log("WS connected")
-}
+ws.onopen = () => {}
 
 ws.onmessage = (event) => {
 
@@ -1288,6 +1512,7 @@ updateBacktestProgressDisplay(data)
 }
 
 function updatePosition(data) {
+  if (v8PanelHiddenById("v8-panel-position")) return
   const p = data?.position
   const el = document.getElementById("position")
   if (!el) return
@@ -1315,9 +1540,8 @@ function updatePosition(data) {
     `
 }
 
-function pnlFmtNum(v){
-if(v === null || v === undefined || Number.isNaN(Number(v))) return "—"
-return Number(v).toFixed(2)
+function pnlFmtNum(v) {
+  return formatCurrency(v)
 }
 
 function pnlFmtStr(v, fallback){
@@ -1347,6 +1571,7 @@ return pnlFmtStr(panel?.mode, "—")
 }
 
 function updateBacktestProgressDisplay(root) {
+  if (v8PanelHiddenById("v8-panel-pnl")) return
   const el = document.getElementById("backtest_progress")
   if (!el) return
   const pnl = root?.pnl || {}
@@ -1360,7 +1585,7 @@ function updateBacktestProgressDisplay(root) {
     const pct = Math.round(Number(prog) * 100)
     let s = `Backtest Running ${pct}%`
     if (tc != null && tc !== "") s += ` · Trades: ${tc}`
-    if (eq != null && eq !== "" && !Number.isNaN(Number(eq))) s += ` · Equity: ${pnlFmtNum(eq)}`
+    if (eq != null && eq !== "" && !Number.isNaN(Number(eq))) s += ` · Equity: ${formatCurrency(eq)}`
     el.innerText = s
     return
   }
@@ -1394,20 +1619,29 @@ Total Equity: ${total}<br>
 `
 }
 
-function updatePnL(data) {
+function updateAccountBalanceOnly(data) {
   const pnl = data?.pnl
   const el = document.getElementById("pnl")
-  if (!pnl) {
-    updateBacktestProgressDisplay({ pnl: {} })
-    if (el) el.innerHTML = `<div class="v8-muted">No PnL data</div>`
-    return
-  }
+  const pnlPanelHidden = v8PanelHiddenById("v8-panel-pnl")
 
-  const realized = Number(pnl.realized_pnl ?? 0).toFixed(2)
-  const drawdown = (Number(pnl.max_drawdown ?? 0) * 100).toFixed(2) + "%"
+  const realized = formatCurrency(sessionPnlLocked.realized_pnl)
+  const drawdown = (Number(sessionPnlLocked.max_drawdown ?? 0) * 100).toFixed(2) + "%"
   const pf = lastMetricsSummary?.profit_factor
   const pfStr =
-    pf != null && !Number.isNaN(Number(pf)) ? Number(pf).toFixed(2) : "—"
+    pf != null && Number.isFinite(Number(pf)) ? formatNumber(pf) : "—"
+
+  if (!pnl) {
+    updateBacktestProgressDisplay({ pnl: {} })
+    if (el && !pnlPanelHidden) {
+      el.innerHTML = `
+        <div class="v8-kv"><span class="k">Equity</span><span class="v mono">—</span></div>
+        <div class="v8-kv"><span class="k">Realized PnL</span><span class="v mono">${realized}</span></div>
+        <div class="v8-kv"><span class="k">Drawdown</span><span class="v mono">${drawdown}</span></div>
+        <div class="v8-kv"><span class="k">Profit Factor</span><span class="v mono">${pfStr}</span></div>
+    `
+    }
+    return
+  }
 
   const panels = Array.isArray(pnl.panels) ? pnl.panels : []
   let equityStr = "—"
@@ -1432,7 +1666,7 @@ function updatePnL(data) {
     floatingHtml = ""
   }
 
-  if (el) {
+  if (el && !pnlPanelHidden) {
     el.innerHTML = `
         <div class="v8-kv"><span class="k">Equity</span><span class="v mono">${equityStr}</span>${
           floatingHtml ? ` <span class="v8-sub">${floatingHtml} floating</span>` : ""
@@ -1443,19 +1677,107 @@ function updatePnL(data) {
     `
   }
 
-  if (pnl.session_status === "single" && totalEq != null && !Number.isNaN(totalEq)) {
-    equityHistory.push(totalEq)
+  if (!v8PanelHiddenById("v8-panel-equity")) {
+    if (pnl.session_status === "single" && totalEq != null && !Number.isNaN(totalEq)) {
+      equityHistory.push(totalEq)
+    }
+
+    if (equityHistory.length > 50) {
+      equityHistory.shift()
+    }
+
+    const chartKey =
+      equityHistory.length === 0
+        ? ""
+        : `${equityHistory.length}:${equityHistory[equityHistory.length - 1]}`
+    if (chartKey !== lastEquityChartKey) {
+      lastEquityChartKey = chartKey
+      updateEquityChart()
+    }
   }
 
-  if (equityHistory.length > 50) {
-    equityHistory.shift()
+  updateBacktestProgressDisplay({ pnl })
+}
+
+function updatePnL(data) {
+  if (v8SessionMetricsActive()) {
+    updateAccountBalanceOnly(data)
+    return
+  }
+  const pnl = data?.pnl
+  const el = document.getElementById("pnl")
+  const pnlPanelHidden = v8PanelHiddenById("v8-panel-pnl")
+  if (!pnl) {
+    updateBacktestProgressDisplay({ pnl: {} })
+    if (el && !pnlPanelHidden) el.innerHTML = `<div class="v8-muted">No PnL data</div>`
+    return
   }
 
-  updateEquityChart()
+  const realized = formatCurrency(pnl.realized_pnl ?? 0)
+  const drawdown = (Number(pnl.max_drawdown ?? 0) * 100).toFixed(2) + "%"
+  const pf = lastMetricsSummary?.profit_factor
+  const pfStr =
+    pf != null && Number.isFinite(Number(pf)) ? formatNumber(pf) : "—"
+
+  const panels = Array.isArray(pnl.panels) ? pnl.panels : []
+  let equityStr = "—"
+  let floatingHtml = ""
+  let totalEq = null
+
+  if (panels.length === 0) {
+    equityStr = pnlFmtNum(pnl.equity)
+    const fp = pnlFloatingPrefix(pnl.floating_pnl)
+    const fc = pnlFloatingStyle(pnl.floating_pnl)
+    floatingHtml = `<span class="v8-floating" style="color:${fc}">${fp}${pnlFmtNum(pnl.floating_pnl)}</span>`
+    totalEq = pnl.total_equity != null ? Number(pnl.total_equity) : null
+  } else if (panels.length === 1) {
+    const p0 = panels[0]
+    equityStr = pnlFmtNum(p0?.equity)
+    const fp = pnlFloatingPrefix(p0?.floating)
+    const fc = pnlFloatingStyle(p0?.floating)
+    floatingHtml = `<span class="v8-floating" style="color:${fc}">${fp}${pnlFmtNum(p0?.floating)}</span>`
+    totalEq = p0?.total_equity != null ? Number(p0.total_equity) : null
+  } else {
+    equityStr = `${panels.length} sessions`
+    floatingHtml = ""
+  }
+
+  if (el && !pnlPanelHidden) {
+    el.innerHTML = `
+        <div class="v8-kv"><span class="k">Equity</span><span class="v mono">${equityStr}</span>${
+          floatingHtml ? ` <span class="v8-sub">${floatingHtml} floating</span>` : ""
+        }</div>
+        <div class="v8-kv"><span class="k">Realized PnL</span><span class="v mono">${realized}</span></div>
+        <div class="v8-kv"><span class="k">Drawdown</span><span class="v mono">${drawdown}</span></div>
+        <div class="v8-kv"><span class="k">Profit Factor</span><span class="v mono">${pfStr}</span></div>
+    `
+  }
+
+  if (!v8PanelHiddenById("v8-panel-equity")) {
+    if (pnl.session_status === "single" && totalEq != null && !Number.isNaN(totalEq)) {
+      equityHistory.push(totalEq)
+    }
+
+    if (equityHistory.length > 50) {
+      equityHistory.shift()
+    }
+
+    const chartKey =
+      equityHistory.length === 0
+        ? ""
+        : `${equityHistory.length}:${equityHistory[equityHistory.length - 1]}`
+    if (chartKey !== lastEquityChartKey) {
+      lastEquityChartKey = chartKey
+      updateEquityChart()
+    }
+  }
+
   updateBacktestProgressDisplay({ pnl })
 }
 
 function updateMetrics(data) {
+  if (v8SessionMetricsActive()) return
+  if (v8PanelHiddenById("v8-panel-metrics")) return
   const el = document.getElementById("metrics")
   if (!el) return
   const m = lastMetricsSummary || data?.metrics
@@ -1463,59 +1785,56 @@ function updateMetrics(data) {
     el.innerHTML = `<div class="v8-muted">—</div>`
     return
   }
-  const wr = m.win_rate != null ? (Number(m.win_rate) * 100).toFixed(1) : "—"
+  const wr =
+    m.win_rate != null && Number.isFinite(Number(m.win_rate))
+      ? formatNumber(Number(m.win_rate) * 100)
+      : "—"
+  const avgWin =
+    m.avg_win != null && m.avg_win !== "" && Number.isFinite(Number(m.avg_win))
+      ? formatNumber(m.avg_win)
+      : "—"
+  const pf =
+    m.profit_factor != null && Number.isFinite(Number(m.profit_factor))
+      ? formatNumber(m.profit_factor)
+      : "—"
   el.innerHTML = `
         <div class="v8-kv"><span class="k">Trades</span><span class="v mono">${m.total_trades ?? "—"}</span></div>
-        <div class="v8-kv"><span class="k">Win rate</span><span class="v mono">${wr}%</span></div>
-        <div class="v8-kv"><span class="k">Avg win</span><span class="v mono">${m.avg_win ?? "—"}</span></div>
+        <div class="v8-kv"><span class="k">Win rate</span><span class="v mono">${wr === "—" ? "—" : `${wr}%`}</span></div>
+        <div class="v8-kv"><span class="k">Avg win</span><span class="v mono">${avgWin}</span></div>
+        <div class="v8-kv"><span class="k">Profit factor</span><span class="v mono">${pf}</span></div>
     `
 }
 
-async function updateTrades() {
-  const table = document.querySelector("#trades tbody")
-  if (!table) return
+function v8BuildTradeRowTr(t) {
+  const timeStr = formatTradeTime(t.time ?? t.timestamp)
 
-  try {
-    const requestId = ++tradesRequestId
+  const side = v8Dash(t.side)
+  const size = v8Dash(t.size)
+  const entry = v8Dash(t.entry)
+  const exit = v8Dash(t.exit)
+  const pnlRaw = t.pnl
+  const pnlStr = v8Dash(pnlRaw)
+  const feeRaw = t.fees ?? t.fee
+  const feeStr =
+    feeRaw !== null && feeRaw !== undefined && feeRaw !== ""
+      ? Number(feeRaw).toFixed(4)
+      : "—"
+  const strat = v8Dash(t.strategy)
+  const sess = v8Dash(t.mode)
 
-    const res = await fetch(`/api/trades/history?${getTradeHistoryQueryParams()}`)
-    const data = await res.json()
-    if (requestId !== tradesRequestId) return
+  const su = String(t.side || "").toUpperCase()
+  const sideColor =
+    su === "LONG" ? "#22c55e" : su === "SHORT" ? "#ef4444" : "#94a3b8"
+  const pnlNum = Number(pnlRaw)
+  const pnlColor =
+    pnlRaw !== null && pnlRaw !== undefined && !Number.isNaN(pnlNum)
+      ? pnlNum >= 0
+        ? "#22c55e"
+        : "#ef4444"
+      : "var(--v8-muted, #94a3b8)"
 
-    table.innerHTML = ""
-
-    if (!data.history) return
-
-    data.history.forEach((t) => {
-      const timeStr = formatTradeTime(t.time)
-
-      const side = v8Dash(t.side)
-      const size = v8Dash(t.size)
-      const entry = v8Dash(t.entry)
-      const exit = v8Dash(t.exit)
-      const pnlRaw = t.pnl
-      const pnlStr = v8Dash(pnlRaw)
-      const feeRaw = t.fees ?? t.fee
-      const feeStr =
-        feeRaw !== null && feeRaw !== undefined && feeRaw !== ""
-          ? Number(feeRaw).toFixed(4)
-          : "—"
-      const strat = v8Dash(t.strategy)
-      const sess = v8Dash(t.mode)
-
-      const su = String(t.side || "").toUpperCase()
-      const sideColor =
-        su === "LONG" ? "#22c55e" : su === "SHORT" ? "#ef4444" : "#94a3b8"
-      const pnlNum = Number(pnlRaw)
-      const pnlColor =
-        pnlRaw !== null && pnlRaw !== undefined && !Number.isNaN(pnlNum)
-          ? pnlNum >= 0
-            ? "#22c55e"
-            : "#ef4444"
-          : "var(--v8-muted, #94a3b8)"
-
-      const row = document.createElement("tr")
-      row.innerHTML = `
+  const row = document.createElement("tr")
+  row.innerHTML = `
 <td class="mono">${timeStr}</td>
 <td style="color:${sideColor}" class="mono">${side}</td>
 <td class="mono">${size}</td>
@@ -1526,55 +1845,126 @@ async function updateTrades() {
 <td class="mono v8-cell-dim">${strat}</td>
 <td class="mono v8-cell-dim">${sess}</td>
 `
-      table.appendChild(row)
-    })
-  } catch (e) {
-    console.log("trade history error", e)
+  return row
+}
+
+function v8TrimTradeTbody(tbody) {
+  while (tbody.rows.length > V8_HISTORY_MAX_ROWS) {
+    tbody.removeChild(tbody.firstChild)
   }
 }
 
-function updateEquityChart(){
+async function updateTrades(forceReload = false) {
+  const table = document.querySelector("#trade_history_v8 tbody")
+  if (!table || !v8TradesHistoryPollActive()) return
 
-const labels = equityHistory.map((_,i)=>i+1);
+  if (v8TradeHistoryCleared && !forceReload) return
 
-const ctx = document.getElementById("equityChart");
+  try {
+    const requestId = ++tradesRequestId
 
-if(!equityChart){
+    const res = await fetch(`/api/trades/history?${getTradeHistoryQueryParams()}`)
+    const data = await res.json()
+    if (requestId !== tradesRequestId) return
 
-equityChart = new Chart(ctx,{
-type:"line",
-data:{
-labels:labels,
-datasets:[{
-label:"Equity",
-data:equityHistory,
-borderColor:"#22c55e",
-fill:false
-}]
-},
-options:{
-responsive:true,
-maintainAspectRatio:false,
-plugins:{
-legend:{
-display:false
+    let all = Array.isArray(data.history) ? data.history : []
+    const anchor = v8ActiveSessionTradeAnchor()
+    if (v8TradeScopedMode(selectedDashboardSession) && anchor > 0) {
+      all = all.filter((t) => tradeRowTimeSec(t) >= anchor)
+    }
+    const limited = all.slice(-V8_HISTORY_MAX_ROWS)
+
+    if (!limited.length) {
+      scheduleV8DashboardPaint(() => {
+        if (requestId !== tradesRequestId) return
+        table.innerHTML = `<tr><td colspan="${V8_TRADE_HISTORY_COLS}" class="v8-empty">No trade history</td></tr>`
+      })
+      lastTradeRowTimeSec = -1
+      v8TradeHistoryCleared = false
+      return
+    }
+
+    const maxTs = limited.reduce((m, t) => Math.max(m, tradeRowTimeSec(t)), 0)
+    if (!forceReload && lastTradeRowTimeSec >= 0 && maxTs <= lastTradeRowTimeSec) {
+      return
+    }
+
+    const isInitial =
+      forceReload ||
+      lastTradeRowTimeSec < 0 ||
+      Boolean(table.querySelector("td.v8-empty"))
+    const newRows = isInitial
+      ? limited
+      : limited.filter((t) => tradeRowTimeSec(t) > lastTradeRowTimeSec)
+
+    if (!newRows.length && !isInitial) return
+
+    lastTradeRowTimeSec = maxTs
+    v8TradeHistoryCleared = false
+
+    scheduleV8DashboardPaint(() => {
+      if (requestId !== tradesRequestId) return
+      if (isInitial) {
+        table.innerHTML = ""
+        const frag = document.createDocumentFragment()
+        newRows.forEach((t) => frag.appendChild(v8BuildTradeRowTr(t)))
+        table.appendChild(frag)
+      } else {
+        const frag = document.createDocumentFragment()
+        newRows.forEach((t) => frag.appendChild(v8BuildTradeRowTr(t)))
+        table.appendChild(frag)
+        v8TrimTradeTbody(table)
+      }
+    })
+  } catch (_e) {
+    /* trade history unavailable */
+  }
 }
-}
-}
-});
 
-}else{
+function updateEquityChart() {
+  if (v8PanelHiddenById("v8-panel-equity")) return
+  const ctx = document.getElementById("equityChart")
+  if (!ctx) return
 
-equityChart.data.labels = labels;
-equityChart.data.datasets[0].data = equityHistory;
-equityChart.update();
+  const labels = equityHistory.map((_, i) => i + 1)
 
-}
+  if (!equityChart) {
+    equityChart = new Chart(ctx, {
+      type: "line",
+      data: {
+        labels,
+        datasets: [
+          {
+            label: "Equity",
+            data: [...equityHistory],
+            borderColor: "#22c55e",
+            fill: false,
+          },
+        ],
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        animation: false,
+        plugins: {
+          legend: { display: false },
+        },
+      },
+    })
+    return
+  }
 
+  equityChart.data.labels = labels
+  equityChart.data.datasets[0].data = [...equityHistory]
+  equityChart.update("none")
 }
 
 function updateSystem(data) {
+  const sys = data?.system
   const sec = Math.floor((Date.now() - v8AppStartMs) / 1000)
+  if (sec < 10) {
+    v8BootstrapAllTradeAnchors()
+  }
   const h = Math.floor(sec / 3600)
   const m = Math.floor((sec % 3600) / 60)
   const uptimeStr = `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}`
@@ -1583,16 +1973,14 @@ function updateSystem(data) {
   if (uptimeHdr) uptimeHdr.innerText = `Uptime: ${uptimeStr}`
 
   const el = document.getElementById("system")
-  if (el) {
+  if (el && !v8PanelHiddenById("v8-panel-system")) {
     let cpu = "—"
     let mem = "—"
-    if (data.system) {
-      cpu = `${Number(data.system.cpu).toFixed(0)}%`
-      const mp = data.system.mem_percent
-      mem =
-        mp != null && !Number.isNaN(Number(mp))
-          ? `${Number(mp).toFixed(0)}%`
-          : `${Number(data.system.mem_mb).toFixed(0)} MB`
+    if (sys) {
+      const c = Number(sys.cpu)
+      cpu = Number.isFinite(c) ? `${c.toFixed(0)}%` : "—"
+      const memDisp = formatSystemMemoryDisplay(sys)
+      mem = memDisp === "—" ? "—" : memDisp
     }
     el.innerHTML = `
         <div class="v8-kv"><span class="k">CPU</span><span class="v mono">${cpu}</span></div>
@@ -1601,21 +1989,23 @@ function updateSystem(data) {
     `
   }
 
-  if (data.system) {
-    const cpuEl = document.getElementById("mh-cpu")
-    const memEl = document.getElementById("mh-mem")
-    if (cpuEl) cpuEl.innerText = "CPU: " + Number(data.system.cpu).toFixed(0) + "%"
-    if (memEl) {
-      const mp = data.system.mem_percent
-      memEl.innerText =
-        mp != null && !Number.isNaN(Number(mp))
-          ? "MEM: " + Number(mp).toFixed(0) + "%"
-          : "MEM: " + data.system.mem_mb.toFixed(1) + " MB"
+  const cpuEl = document.getElementById("mh-cpu")
+  const memEl = document.getElementById("mh-memory")
+  if (cpuEl) {
+    if (sys && Number.isFinite(Number(sys.cpu))) {
+      cpuEl.innerText = `CPU: ${Number(sys.cpu).toFixed(0)}%`
+    } else {
+      cpuEl.innerText = "CPU: —"
     }
+  }
+  if (memEl) {
+    const memDisp = formatSystemMemoryDisplay(sys)
+    memEl.innerText = memDisp === "—" ? "MEM: —" : `MEM: ${memDisp}`
   }
 }
 
 function updateExecution(data) {
+  if (v8PanelHiddenById("v8-panel-execution")) return
   const exec = data?.observability?.execution_monitor
   const pos = data?.position
   const rt = Array.isArray(data?.recent_trades) ? data.recent_trades : []
@@ -1695,12 +2085,13 @@ if(typeof v === "number" && Number.isFinite(v)) return String(v)
 return String(v)
 }
 
-function updateRisk(data){
+function updateRisk(data) {
+  if (v8PanelHiddenById("v8-panel-risk")) return
 
 const rs = data?.risk_status
 const pnl = data?.pnl
 
-if(!rs && !pnl) return
+if (!rs && !pnl && !v8SessionMetricsActive()) return
 
 let html = ""
 
@@ -1719,8 +2110,8 @@ html += `<b>Control state:</b> ${riskFmt(rs.readonly_state)}<br>`
 
 const der = rs.daily_equity_risk
 if(der && typeof der === "object" && Object.keys(der).length){
-html += `<br><b>Daily start equity:</b> ${riskFmt(der.daily_start_equity)}<br>`
-html += `<b>Current equity:</b> ${riskFmt(der.current_equity)}<br>`
+html += `<br><b>Daily start equity:</b> ${formatCurrency(der.daily_start_equity)}<br>`
+html += `<b>Current equity:</b> ${formatCurrency(der.current_equity)}<br>`
 html += `<b>Daily drawdown:</b> ${
 der.daily_drawdown_pct === null || der.daily_drawdown_pct === undefined
 ? "—"
@@ -1753,7 +2144,7 @@ detail = rule.cooldown_active
 : "—"
 }else if(key === "max_drawdown"){
 if(rule.active){
-detail = `start ${riskFmt(rule.daily_start_equity)} / curr ${riskFmt(rule.current_equity)} / dd ${riskFmt(rule.daily_drawdown_pct)}% / limit ${riskFmt(rule.max_drawdown)}%`
+detail = `start ${formatCurrency(rule.daily_start_equity)} / curr ${formatCurrency(rule.current_equity)} / dd ${riskFmt(rule.daily_drawdown_pct)}% / limit ${riskFmt(rule.max_drawdown)}%`
 }else{
 detail = "inactive until first trade (UTC day)"
 }
@@ -1763,14 +2154,26 @@ html += `<br><b>${key}</b> (${st})<br>${detail}<br>`
 html += "<br>"
 }
 
-if(pnl){
-const drawdown = (Number(pnl.max_drawdown ?? 0) * 100).toFixed(2) + "%"
-const realized = Number(pnl.realized_pnl ?? 0).toFixed(2)
-html += `<b>Journal drawdown:</b> ${drawdown}<br>`
-html += `<b>Realized PnL:</b> ${realized}<br>`
+const showJournal = Boolean(pnl) || v8SessionMetricsActive()
+if (showJournal) {
+  const drawdownStr = v8SessionMetricsActive()
+    ? (Number(sessionPnlLocked.max_drawdown ?? 0) * 100).toFixed(2) + "%"
+    : (Number(pnl?.max_drawdown ?? 0) * 100).toFixed(2) + "%"
+  const realizedStr = v8SessionMetricsActive()
+    ? formatCurrency(sessionPnlLocked.realized_pnl ?? 0)
+    : formatCurrency(pnl?.realized_pnl ?? 0)
+  html += `<b>Journal drawdown:</b> <span id="risk-journal-drawdown" class="mono">${drawdownStr}</span><br>`
+  html += `<b>Realized PnL:</b> <span id="risk-realized-pnl" class="mono">${realizedStr}</span><br>`
 }
 
-document.getElementById("risk").innerHTML = html
+const riskEl = document.getElementById("risk")
+if (!riskEl) return
+riskEl.innerHTML = html
+
+if (v8SessionMetricsActive()) {
+  resetV8SessionRiskPlaceholder()
+  return
+}
 }
 
 function updateSystemMonitor(data){
@@ -1785,6 +2188,7 @@ function updateSystemMonitor(data){
 }
 
 function updateStrategy(data) {
+  if (v8PanelHiddenById("v8-panel-strategy")) return
   const pos = data?.position
   const bias = data?.market_bias || {}
   const el = document.getElementById("strategy")
@@ -1810,6 +2214,8 @@ function updateStrategy(data) {
 }
 
 function updatePerformance(data) {
+  if (v8SessionMetricsActive()) return
+  if (v8PanelHiddenById("v8-panel-performance")) return
   const el = document.getElementById("performance")
   if (!el) return
   const m = lastMetricsSummary || data?.metrics
@@ -1821,13 +2227,86 @@ function updatePerformance(data) {
   }
   el.innerHTML = `
     <div class="v8-kv"><span class="k">Profit factor</span><span class="v mono">${
-      m.profit_factor != null ? Number(m.profit_factor).toFixed(2) : "—"
+      m.profit_factor != null && Number.isFinite(Number(m.profit_factor))
+        ? formatNumber(m.profit_factor)
+        : "—"
     }</span></div>
     <div class="v8-kv"><span class="k">Max drawdown</span><span class="v mono">${mdd}</span></div>
     `
 }
 
+function updateMetricsPanel(payload) {
+  const trades = payload.trades ?? payload.total_trades
+  lastMetricsSummary = {
+    total_trades: trades ?? 0,
+    win_rate: payload.win_rate ?? 0,
+    avg_win: payload.avg_win ?? 0,
+    profit_factor: payload.profit_factor ?? 0,
+  }
+  updateMetrics({})
+}
+
+function updatePerformancePanel(payload) {
+  if (!lastMetricsSummary) {
+    lastMetricsSummary = {}
+  }
+  lastMetricsSummary = {
+    ...lastMetricsSummary,
+    profit_factor:
+      payload.profit_factor != null ? payload.profit_factor : lastMetricsSummary.profit_factor,
+  }
+  updatePerformance({
+    pnl: { max_drawdown: payload.max_drawdown ?? 0 },
+    metrics: { profit_factor: payload.profit_factor },
+  })
+}
+
+function resetV8SessionRiskPlaceholder() {
+  const drawdown = document.getElementById("risk-journal-drawdown")
+  const realized = document.getElementById("risk-realized-pnl")
+  if (drawdown) {
+    drawdown.textContent = "0.00%"
+  }
+  if (realized) {
+    realized.textContent = "0.00"
+  }
+}
+
+function resetV8Metrics() {
+  const holdSessionMetrics = useSessionMetrics
+  useSessionMetrics = false
+  try {
+    sessionStats = {
+      trades: 0,
+      wins: 0,
+      losses: 0,
+      pnl: 0,
+      drawdown: 0,
+      profitFactor: 0,
+    }
+    sessionPnlLocked = {
+      realized_pnl: 0,
+      max_drawdown: 0,
+    }
+    updateMetricsPanel({
+      trades: 0,
+      win_rate: 0,
+      avg_win: 0,
+      profit_factor: 0,
+    })
+    updatePerformancePanel({
+      profit_factor: 0,
+      max_drawdown: 0,
+    })
+    resetV8SessionRiskPlaceholder()
+    updateAccountBalanceOnly(lastDashboardPayload || {})
+  } finally {
+    useSessionMetrics = holdSessionMetrics
+  }
+}
+
 function updateReconciliation(data) {
+  if (v8PanelHiddenById("v8-panel-reconciliation")) return
   const el = document.getElementById("reconciliation")
   if (!el) return
   const pos = data.position || { side: "flat", size: 0 }
@@ -1841,6 +2320,7 @@ function updateReconciliation(data) {
 }
 
 function updateSlippage(data) {
+  if (v8PanelHiddenById("v8-panel-slippage")) return
   const el = document.getElementById("slippage")
   if (!el) return
   if (!data.observability || !data.observability.execution_monitor) {
@@ -1860,6 +2340,7 @@ function updateSlippage(data) {
 }
 
 function updateLatency(data) {
+  if (v8PanelHiddenById("v8-panel-latency")) return
   const el = document.getElementById("latency")
   if (!el) return
   const fmt = (v) =>
@@ -1881,6 +2362,7 @@ function updateLatency(data) {
 }
 
 function updateAlerts(data) {
+  if (v8PanelHiddenById("v8-panel-alerts")) return
   const el = document.getElementById("alerts")
   if (!el) return
   const alerts = []
@@ -1924,9 +2406,7 @@ select.appendChild(opt)
 
 })
 
-}catch(e){
-
-console.log("symbol load error",e)
+}catch(_e){
 
 }
 
@@ -1970,8 +2450,6 @@ const ws = new WebSocket("ws://127.0.0.1:8000/ws/state/live_shadow")
 ws.onmessage = (event)=>{
 
 const data = JSON.parse(event.data)
-
-console.log("WS MARKET DATA:", data)
 
 if(data.price){
 
@@ -2032,9 +2510,7 @@ setTimeout(()=>{
 priceEl.style.color = "#e2e8f0"
 },300)
 
-}catch(e){
-
-console.log(e)
+}catch(_e){
 
 }
 
@@ -2069,6 +2545,8 @@ function renderExecutionPipeline() {
 }
 
 function updateExecutionPipeline(data) {
+  if (v8PanelHiddenById("v8-panel-pipeline")) return
+  const root = data || {}
   const selectedStatus = sessionRuntimeStatus[selectedDashboardSession] || "UNKNOWN"
   const steps = ["signal", "decision", "order", "exchange", "fill"]
   const meta = document.getElementById("v8_pipeline_meta")
@@ -2084,13 +2562,13 @@ function updateExecutionPipeline(data) {
   }
 
   let stage = "signal"
-  if (data.position?.side && data.position.side !== "flat") {
+  if (root.position?.side && root.position.side !== "flat") {
     stage = "fill"
-  } else if (data.recent_trades && data.recent_trades.length > 0) {
+  } else if (root.recent_trades && root.recent_trades.length > 0) {
     stage = "fill"
-  } else if (data?.observability?.execution_monitor?.fill_price) {
+  } else if (root?.observability?.execution_monitor?.fill_price) {
     stage = "fill"
-  } else if (data?.observability?.execution_monitor?.signal_price) {
+  } else if (root?.observability?.execution_monitor?.signal_price) {
     stage = "decision"
   }
 
@@ -2112,7 +2590,7 @@ function updateExecutionPipeline(data) {
     }
   })
 
-  const exec = data?.observability?.execution_monitor
+  const exec = root?.observability?.execution_monitor
   const lat = exec?.total_latency_ms
   const stageLabel = V8_PIPELINE_STAGE_LABELS[stage] || stage
   if (meta) {
@@ -2128,12 +2606,110 @@ function updateV8PipelineBreadcrumb(_data) {
   el.textContent = "Signal → Decision → Order → Exchange → Fill"
 }
 
+function v8ExecPriceField(v) {
+  if (v === null || v === undefined || v === "") return "—"
+  const n = Number(v)
+  if (!Number.isFinite(n)) return "—"
+  return n.toLocaleString(undefined, { maximumFractionDigits: 8 })
+}
+
+function v8ExecSlippageField(v) {
+  if (v === null || v === undefined || v === "") return "—"
+  const n = Number(v)
+  if (!Number.isFinite(n)) return "—"
+  return n.toFixed(4)
+}
+
+function v8ExecLatencyField(v) {
+  if (v === null || v === undefined || v === "") return "—"
+  const n = Number(v)
+  if (!Number.isFinite(n)) return "—"
+  return `${n.toFixed(2)} ms`
+}
+
+function v8ExecStatusField(t) {
+  return v8Dash(t?.status)
+}
+
+/** Clears execution history table in the UI only; next poll refills from API. */
+function clearV8ExecutionHistoryView() {
+  const tbody = document.querySelector("#execution_history_v8 tbody")
+  if (!tbody) return
+  lastExecRowTimeSec = -1
+  tbody.innerHTML = `<tr><td colspan="${V8_EXEC_HISTORY_COLS}" class="v8-table-placeholder">Cleared — view only; data reloads on next refresh</td></tr>`
+}
+
+/** Clears trade history table in the UI only; use F5 or session change for a full reload. */
+function clearV8TradeHistoryView() {
+  const tbody = document.querySelector("#trade_history_v8 tbody")
+  if (!tbody) return
+  resetV8Metrics()
+  clearV8ExecutionHistoryView()
+  useSessionMetrics = true
+  localStorage.setItem(V8_SESSION_METRICS_KEY, "true")
+  lastTradeRowTimeSec = 0
+  v8TradeHistoryCleared = true
+  tbody.innerHTML = `
+    <tr>
+      <td colspan="${V8_TRADE_HISTORY_COLS}" class="v8-empty">
+        Trade history cleared
+      </td>
+    </tr>
+  `
+}
+
+/** Exit session-metrics mode and resume server-backed metrics (optional; e.g. console or future control). */
+function resetSessionMetrics() {
+  useSessionMetrics = false
+  localStorage.removeItem(V8_SESSION_METRICS_KEY)
+  void loadDashboard()
+}
+
+window.resetSessionMetrics = resetSessionMetrics
+
+function v8BuildExecRowTr(t) {
+  const ts = t.timestamp ?? t.time
+  const time = formatTradeTime(ts)
+  const symbol = v8Dash(t.symbol)
+  const side = v8Dash(t.side)
+  const size = v8Dash(t.qty ?? t.size)
+  const signalPx = v8ExecPriceField(t.signal_price)
+  const orderPx = v8ExecPriceField(t.order_price)
+  const fillPx = v8ExecPriceField(t.fill_price)
+  const slip = v8ExecSlippageField(t.slippage)
+  const latency = v8ExecLatencyField(t.latency)
+  const status = v8ExecStatusField(t)
+  const step = v8Dash(t.step)
+  const orderId = v8Dash(t.order_id)
+
+  const su = String(t.side || "").toUpperCase()
+  const sideColor =
+    su === "LONG" ? "#22c55e" : su === "SHORT" ? "#ef4444" : ""
+
+  const row = document.createElement("tr")
+  row.innerHTML = `
+<td class="mono">${time}</td>
+<td class="mono">${symbol}</td>
+<td class="mono"${sideColor ? ` style="color:${sideColor}"` : ""}>${side}</td>
+<td class="mono">${size}</td>
+<td class="mono">${signalPx}</td>
+<td class="mono">${orderPx}</td>
+<td class="mono">${fillPx}</td>
+<td class="mono">${slip}</td>
+<td class="mono">${latency}</td>
+<td class="mono">${status}</td>
+<td class="mono v8-cell-dim">${step}</td>
+<td class="mono">${orderId}</td>
+`
+  return row
+}
+
 async function updateExecutionHistory() {
   const table = document.querySelector("#execution_history_v8 tbody")
-  if (!table) return
+  if (!table || !v8ExecHistoryPollActive()) return
 
   const placeholder = (msg) => {
-    table.innerHTML = `<tr><td colspan="6" class="v8-table-placeholder">${msg}</td></tr>`
+    table.innerHTML = `<tr><td colspan="${V8_EXEC_HISTORY_COLS}" class="v8-table-placeholder">${msg}</td></tr>`
   }
 
   try {
@@ -2143,58 +2719,56 @@ async function updateExecutionHistory() {
 
     if (!res.ok) {
       placeholder("No execution history available")
+      lastExecRowTimeSec = -1
       return
     }
 
     const data = await res.json()
     if (requestId !== executionHistoryRequestId) return
 
-    table.innerHTML = ""
+    const all = Array.isArray(data.history) ? data.history : []
+    const limited = all.slice(0, V8_HISTORY_MAX_ROWS)
 
-    if (!data.history || !data.history.length) {
+    if (!limited.length) {
       placeholder("No execution history available")
+      lastExecRowTimeSec = -1
       return
     }
 
-    const rows = data.history.slice(0, 50)
-    rows.forEach((t) => {
-      const time = formatTradeTime(t.time)
+    const topTs = execRowTimeSec(limited[0])
+    if (lastExecRowTimeSec >= 0 && topTs <= lastExecRowTimeSec) {
+      return
+    }
 
-      const step =
-        t.strategy != null && String(t.strategy).trim() !== ""
-          ? v8Dash(t.strategy)
-          : v8Dash(t.mode)
-      const actSide = v8Dash(t.side)
-      const actSym = v8Dash(t.symbol)
-      const action =
-        actSide === "—" && actSym === "—" ? "—" : `${actSide} · ${actSym}`
-      const price = v8Dash(t.fill_price)
-      const latRaw = t.latency
-      const latency =
-        latRaw !== null && latRaw !== undefined && latRaw !== ""
-          ? `${Number(latRaw).toFixed(2)} ms`
-          : "—"
+    const isInitial = lastExecRowTimeSec < 0
+    const newRows = isInitial
+      ? limited
+      : limited.filter((t) => execRowTimeSec(t) > lastExecRowTimeSec)
 
-      let status = "OK"
-      const slip = t.slippage
-      if (slip !== null && slip !== undefined && slip !== "") {
-        const sn = Number(slip)
-        if (!Number.isNaN(sn) && Math.abs(sn) > 0.001) status = "CHECK"
+    if (!newRows.length && !isInitial) return
+
+    lastExecRowTimeSec = Math.max(lastExecRowTimeSec, topTs)
+
+    scheduleV8DashboardPaint(() => {
+      if (requestId !== executionHistoryRequestId) return
+      if (isInitial) {
+        table.innerHTML = ""
+        const frag = document.createDocumentFragment()
+        newRows.forEach((t) => frag.appendChild(v8BuildExecRowTr(t)))
+        table.appendChild(frag)
+      } else {
+        const frag = document.createDocumentFragment()
+        newRows.forEach((t) => frag.appendChild(v8BuildExecRowTr(t)))
+        const first = table.firstChild
+        if (first) table.insertBefore(frag, first)
+        else table.appendChild(frag)
+        while (table.rows.length > V8_HISTORY_MAX_ROWS) {
+          table.removeChild(table.lastChild)
+        }
       }
-
-      const row = document.createElement("tr")
-      row.innerHTML = `
-<td class="mono">${time}</td>
-<td class="mono v8-cell-dim">${step}</td>
-<td class="mono">${action || "—"}</td>
-<td class="mono">${price}</td>
-<td class="mono">${latency}</td>
-<td class="mono">${status}</td>
-`
-      table.appendChild(row)
     })
-  } catch (e) {
-    console.log("execution history error", e)
+  } catch (_e) {
+    lastExecRowTimeSec = -1
     placeholder("No execution history available")
   }
 }

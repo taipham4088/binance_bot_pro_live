@@ -1,7 +1,7 @@
 import threading
 import time
 from collections import deque
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Dict, Optional
 
 from backend.analytics.session_publish_context import resolve_session_id_from_call_stack
@@ -48,6 +48,14 @@ class ExecutionTrace:
     fill_price: Optional[float] = None
     fee: Optional[float] = None
     strategy: Optional[str] = None
+
+    # Observability (optional; populated from EXECUTION payload or inferred at snapshot)
+    order_price: Optional[float] = None
+    order_id: Optional[str] = None
+    status: Optional[str] = None
+    step: Optional[str] = None
+    # Optional pipeline timestamp (ms); preferred over derived wall time for DB row `time`
+    event_time_ms: Optional[int] = None
 
     def mark_order_sent(self):
         self.order_sent_time = time.time()
@@ -232,7 +240,33 @@ class ExecutionMonitor:
         if event.get("fill_time"):
             trace.fill_time = event.get("fill_time")
         elif trace.fill_time is None:
-            trace.fill_time = time.time()      
+            trace.fill_time = time.time()
+
+        if event.get("order_price") is not None:
+            try:
+                trace.order_price = float(event["order_price"])
+            except (TypeError, ValueError):
+                pass
+        if event.get("order_id") is not None:
+            trace.order_id = str(event["order_id"])
+        if event.get("status") is not None:
+            trace.status = str(event["status"])
+        if event.get("step") is not None:
+            trace.step = str(event["step"])
+
+        if event.get("event_time_ms") is not None:
+            try:
+                trace.event_time_ms = int(event["event_time_ms"])
+            except (TypeError, ValueError):
+                pass
+        elif event.get("timestamp") is not None:
+            try:
+                trace.event_time_ms = int(float(event["timestamp"]) * 1000)
+            except (TypeError, ValueError):
+                pass
+
+        if trace.status is None and event.get("error"):
+            trace.status = "error"
 
         self.last_trace = trace
 
@@ -282,13 +316,39 @@ class ExecutionMonitor:
         if signal_price is not None and t.fill_price is not None:
             slippage = t.fill_price - signal_price
 
-        return {
+        order_price = t.order_price
+        if order_price is None and t.fill_price is not None:
+            order_price = t.fill_price
+
+        step = t.step
+        if not step:
+            step = "fill"
+
+        status = t.status
+        if not status:
+            status = "success" if t.fill_price is not None else "unknown"
+
+        event_time_ms = t.event_time_ms
+        if event_time_ms is None:
+            event_wall = t.fill_time or t.signal_time
+            if event_wall is not None:
+                try:
+                    event_time_ms = int(float(event_wall) * 1000)
+                except (TypeError, ValueError):
+                    event_time_ms = None
+
+        ts_sec = None
+        if event_time_ms is not None:
+            ts_sec = int(event_time_ms / 1000)
+
+        out = {
 
             "symbol": t.symbol,
             "side": t.side,
             "size": t.size,
 
             "signal_price": signal_price,
+            "order_price": order_price,
             "fill_price": t.fill_price,
             "fee": t.fee,
 
@@ -300,7 +360,16 @@ class ExecutionMonitor:
             "exchange_latency_ms": t.exchange_latency_ms(),
             "fill_latency_ms": t.fill_latency_ms(),
             "total_latency_ms": t.total_latency_ms(),
+
+            "status": status,
+            "step": step,
+            "order_id": t.order_id,
         }
+        if event_time_ms is not None:
+            out["event_time_ms"] = event_time_ms
+        if ts_sec is not None:
+            out["timestamp"] = ts_sec
+        return out
 
     def restore_position(self, symbol, side, size, price):
 

@@ -4,9 +4,9 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>BOT PRO LIVE — Trading Desk V8</title>
-<link rel="stylesheet" href="/dashboard/css/dashboard_v8.css?v=3">
+<link rel="stylesheet" href="/dashboard/css/dashboard_v8.css?v=8">
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-<script src="/dashboard/js/dashboard_v8.js?v=3" defer></script>
+<script src="/dashboard/js/dashboard_v8.js?v=8" defer></script>
 </head>
 <body class="v8-body">
 
@@ -62,7 +62,7 @@
     <span class="v8-sep">|</span>
     <span id="mh-cpu" class="mono muted">CPU: —</span>
     <span class="v8-sep">|</span>
-    <span id="mh-mem" class="mono muted">MEM: —</span>
+    <span id="mh-memory" class="mono muted">MEM: —</span>
     <span class="v8-sep">|</span>
     <span id="mh-uptime" class="mono muted">Uptime: —</span>
   </div>
@@ -258,8 +258,12 @@
         </div>
       </div>
       <div id="v8_pane_trades" class="v8-tab-pane" role="tabpanel">
+        <div class="v8-trade-history-toolbar">
+          <div class="v8-trade-history-title">Trade History</div>
+          <button type="button" class="v8-btn v8-btn-ghost v8-btn-compact" onclick="clearV8TradeHistoryView()">Clear</button>
+        </div>
         <div class="v8-table-scroll table-scroll">
-          <table id="trades" class="v8-table v8-history-table v8-trades-extended">
+          <table id="trade_history_v8" class="v8-table v8-history-table v8-trades-extended">
             <thead>
               <tr>
                 <th>TIME</th>
@@ -278,16 +282,26 @@
         </div>
       </div>
       <div id="v8_pane_exec" class="v8-tab-pane" role="tabpanel" hidden>
+        <div class="v8-exec-history-toolbar">
+          <span class="v8-exec-history-toolbar-title">Execution History</span>
+          <button type="button" class="v8-btn v8-btn-ghost v8-btn-compact" id="v8_exec_history_clear_btn" onclick="clearV8ExecutionHistoryView()">Clear</button>
+        </div>
         <div class="v8-table-scroll table-scroll">
           <table id="execution_history_v8" class="v8-table v8-history-table v8-exec-history-table">
             <thead>
               <tr>
                 <th>TIME</th>
-                <th>STEP</th>
-                <th>ACTION</th>
-                <th>PRICE</th>
+                <th>SYMBOL</th>
+                <th>SIDE</th>
+                <th>SIZE</th>
+                <th>SIGNAL</th>
+                <th>ORDER</th>
+                <th>FILL</th>
+                <th>SLIPPAGE</th>
                 <th>LATENCY</th>
                 <th>STATUS</th>
+                <th>STEP</th>
+                <th>ORDER ID</th>
               </tr>
             </thead>
             <tbody></tbody>
@@ -328,16 +342,16 @@
       </div>
       <div class="session-row">
         <span>PAPER</span>
-        <button type="button" data-session="paper" data-action="start">Start</button>
-        <button type="button" data-session="paper" data-action="stop">Stop</button>
-        <button type="button" data-session="paper" data-action="restart">Restart</button>
+        <button type="button" class="v8-btn-start" data-session="paper" data-action="start">Start</button>
+        <button type="button" class="v8-btn-stop" data-session="paper" data-action="stop">Stop</button>
+        <button type="button" class="v8-btn-restart" data-session="paper" data-action="restart">Restart</button>
         <button type="button" data-session="paper" data-action="export">Export</button>
       </div>
       <div class="session-row">
         <span>BACKTEST</span>
-        <button type="button" data-session="backtest" data-action="start">Start</button>
-        <button type="button" data-session="backtest" data-action="stop">Stop</button>
-        <button type="button" data-session="backtest" data-action="restart">Restart</button>
+        <button type="button" class="v8-btn-start" data-session="backtest" data-action="start">Start</button>
+        <button type="button" class="v8-btn-stop" data-session="backtest" data-action="stop">Stop</button>
+        <button type="button" class="v8-btn-restart" data-session="backtest" data-action="restart">Restart</button>
         <button type="button" data-session="backtest" data-action="import">Import</button>
         <button type="button" data-session="backtest" data-action="export">Export</button>
       </div>
