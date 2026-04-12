@@ -12,8 +12,12 @@ let skipNextControlPanelRefresh = false
 /** Server-backed values for control rows; pending UI = select/input value !== last applied */
 const lastAppliedControlValues = {}
 let selectedDashboardSession = "live"
+/** Cached `/api/dashboard` JSON per session for instant tab switches without refetch. */
+const dashboardSessionCache = {}
 let dualPanelModeEnabled = false
 let dashboardRequestId = 0
+let lastPrefetchTime = 0
+const PREFETCH_COOLDOWN_MS = 15000
 let tradesRequestId = 0
 let executionHistoryRequestId = 0
 const sessionRuntimeStatus = {
@@ -25,6 +29,19 @@ const sessionRuntimeStatus = {
 
 /** Latest /api/dashboard/metrics payload for V8 summary cards (PnL profit factor, etc.). */
 let lastMetricsSummary = null
+
+/** Client-side trade/exec memory (cleared on backtest switch / reset). */
+let recentTrades = []
+let tradeHistory = []
+let executionHistory = []
+let lastTrades = []
+let lastExecution = []
+let lastBacktestSummary = null
+
+/** Last rendered PnL snapshot (cleared on backtest reset). */
+let lastPnl = null
+let lastDrawdown = null
+let lastEquity = null
 
 const v8AppStartMs = Date.now()
 
@@ -51,6 +68,60 @@ const V8_SESSION_METRICS_KEY = "dashboard_v8_session_metrics"
 
 /** Last dashboard JSON for panels that need pnl without re-fetching. */
 let lastDashboardPayload = null
+
+/** When true, backtest dashboard polls skip applying idle/stale payloads until a run is detected (client-side). */
+let backtestResetActive = false
+let v8BacktestResetFailsafeTimer = null
+
+/** When true, block all backtest dashboard paints (PnL, summary, full paint) until a run is detected or failsafe. */
+let backtestUIHardReset = false
+
+/** One-shot bypass so refreshAllPanels / paint can run right after backtest Start/Restart while hard reset is still on. */
+let backtestLifecycleRefresh = false
+
+/** Set when dashboard payload shows backtest has actually started; gates lifecycle bypass against stale payloads. */
+let backtestLifecycleReady = false
+
+/** True after switching to backtest or clearing trade history until a started run is seen in payload. */
+let backtestIdleMode = false
+
+/** Unix seconds at last backtest UI reset; recent_trades must be newer than this to count as started. */
+let backtestResetTimestamp = 0
+
+function isBacktestHardReset() {
+  return String(selectedDashboardSession || "").toLowerCase() === "backtest" && backtestUIHardReset
+}
+
+/** Infer API session bucket from dashboard JSON (for stale-session guards). */
+function v8PayloadSessionHint(data) {
+  const p0 = data?.pnl?.panels?.[0]
+  const sid = p0?.session_id
+  if (sid != null && sid !== "") return String(sid).toLowerCase()
+  const raw =
+    data?.session ??
+    data?.dashboard_session ??
+    data?.pnl?.mode ??
+    data?.mode ??
+    null
+  if (raw != null && raw !== "") {
+    const u = String(raw).toUpperCase()
+    if (u.includes("BACKTEST")) return "backtest"
+    if (u.includes("PAPER")) return "paper"
+    if (u.includes("SHADOW")) return "shadow"
+    if (u.includes("LIVE")) return "live"
+  }
+  return null
+}
+
+/** True if this UI path must not run during backtest hard reset; logs once per skip (temporary audit aid). */
+function v8SkipIfBacktestHardReset(fnName) {
+  if (backtestLifecycleRefresh && backtestLifecycleReady) return false
+  if (!isBacktestHardReset()) return false
+  if (typeof console !== "undefined" && console.debug) {
+    console.debug("[V8 backtest hard reset] skip UI update:", fnName)
+  }
+  return true
+}
 
 /** Incremental trade history watermark (unix seconds); reset on load / session / clear. */
 let lastTradeRowTimeSec = 0
@@ -112,6 +183,8 @@ let sessionPnlLocked = {
 }
 
 let v8DashboardPaintRaf = null
+/** Incremented on backtest hard reset to drop stale scheduled dashboard paints. */
+let v8PaintToken = 0
 
 function v8Dash(v) {
   if (v === null || v === undefined || v === "") return "—"
@@ -238,9 +311,12 @@ function execRowTimeSec(t) {
 }
 
 function scheduleV8DashboardPaint(fn) {
+  if (isBacktestHardReset() && (!backtestLifecycleRefresh || !backtestLifecycleReady)) return
   if (v8DashboardPaintRaf != null) cancelAnimationFrame(v8DashboardPaintRaf)
+  const token = v8PaintToken
   v8DashboardPaintRaf = requestAnimationFrame(() => {
     v8DashboardPaintRaf = null
+    if (token !== v8PaintToken) return
     fn()
   })
 }
@@ -361,6 +437,7 @@ function resetV8DashboardLayout() {
 function applyDashboardModeVisibility() {
   const m = (selectedDashboardSession || "live").toLowerCase()
   document.body.dataset.v8Session = m
+  document.body.classList.toggle("v8-backtest-mode", m === "backtest")
   document.querySelectorAll("[data-v8-modes]").forEach((el) => {
     const raw = el.getAttribute("data-v8-modes") || ""
     if (!raw.trim()) return
@@ -617,6 +694,11 @@ async function sessionAction(sessionId, action, btn) {
       throw new Error(`Unsupported action: ${action}`)
     }
     const sessionLc = String(sessionId || "").toLowerCase()
+    if (sessionLc === "backtest" && (action === "restart" || action === "start")) {
+      resetBacktestPanels()
+      delete dashboardSessionCache["backtest"]
+      backtestLifecycleRefresh = true
+    }
     if (v8TradeScopedMode(sessionLc) && action === "start") {
       sessionTradeStartSec[sessionLc] = Math.floor(Date.now() / 1000)
       lastTradeRowTimeSec = 0
@@ -856,6 +938,7 @@ async function loadSessionConfig() {
 }
 
 async function refreshAllPanels() {
+  if (isBacktestHardReset() && (!backtestLifecycleRefresh || !backtestLifecycleReady)) return
   await loadDashboard()
   if (v8TradesHistoryPollActive()) await updateTrades(true)
   if (v8ExecHistoryPollActive()) await updateExecutionHistory()
@@ -869,6 +952,7 @@ async function refreshAllPanels() {
     ])
 
     scheduleV8DashboardPaint(() => {
+      if (v8SkipIfBacktestHardReset("refreshAllPanels")) return
       updatePosition({ position })
       updatePnL({ pnl })
       updateRisk({ risk_status: risk, pnl })
@@ -879,11 +963,15 @@ async function refreshAllPanels() {
 }
 
 async function refreshAfterLifecycleAction() {
-  await refreshAllPanels()
-  // Post-lifecycle state can settle asynchronously; perform short retries.
-  for (let i = 0; i < 2; i++) {
-    await new Promise((resolve) => setTimeout(resolve, 600))
+  try {
     await refreshAllPanels()
+    // Post-lifecycle state can settle asynchronously; perform short retries.
+    for (let i = 0; i < 2; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 600))
+      await refreshAllPanels()
+    }
+  } finally {
+    backtestLifecycleRefresh = false
   }
 }
 
@@ -989,6 +1077,9 @@ async function pollV8Metrics() {
   ) {
     return
   }
+  if (v8SkipIfBacktestHardReset("pollV8Metrics")) {
+    return
+  }
   if (v8SessionMetricsActive()) {
     return
   }
@@ -1025,6 +1116,173 @@ function hydrateSessionSelectorFromStorage() {
   applyDashboardModeVisibility()
 }
 
+function resetBacktestPnL() {
+  const el = document.getElementById("pnl")
+  if (!el) return
+  el.innerHTML = `
+<div class="v8-kv"><span class="k">Equity</span><span class="v mono">—</span></div>
+<div class="v8-kv"><span class="k">Realized PnL</span><span class="v mono">0</span></div>
+<div class="v8-kv"><span class="k">Drawdown</span><span class="v mono">0%</span></div>
+<div class="v8-kv"><span class="k">Profit Factor</span><span class="v mono">—</span></div>
+`
+  const prog = document.getElementById("backtest_progress")
+  if (prog) prog.innerText = "Backtest not started"
+}
+
+function resetBacktestSummary() {
+  const root = document.getElementById("v8_backtest_summary_root")
+  if (!root) return
+  root.innerHTML = `
+<div class="v8-backtest-empty">
+Waiting for backtest execution…
+</div>
+`
+}
+
+/** True when payload has at least one trade strictly after the last backtest UI reset (unix seconds). */
+function v8IsNewBacktestRun(data) {
+  const rt = data?.recent_trades
+  if (!Array.isArray(rt) || rt.length === 0) return false
+  const newestTrade = rt[rt.length - 1]
+  let tradeTime =
+    v8BacktestTradeTimeSec(newestTrade) ??
+    (() => {
+      const v = newestTrade?.exit_time
+      if (v == null) return 0
+      const n = Number(v)
+      if (!Number.isFinite(n) || n <= 0) return 0
+      return n > 1e12 ? Math.floor(n / 1000) : Math.floor(n)
+    })()
+  if (!Number.isFinite(tradeTime) || tradeTime <= 0) {
+    const n = Number(
+      newestTrade?.time ??
+        newestTrade?.timestamp ??
+        newestTrade?.exit_time ??
+        0
+    )
+    if (Number.isFinite(n) && n > 0) {
+      tradeTime = n > 1e12 ? n / 1000 : n
+    } else {
+      tradeTime = 0
+    }
+  }
+  return tradeTime > backtestResetTimestamp
+}
+
+/** True when payload indicates a backtest run worth painting (no backend `backtest_running` required). */
+function v8BacktestDashboardLooksStarted(data) {
+  let ok = false
+  if (data?.backtest_running === true) ok = true
+  else {
+    const rt = data?.recent_trades
+    if (Array.isArray(rt) && rt.length > 0) {
+      const newestTrade = rt[rt.length - 1]
+      let tradeTime =
+        v8BacktestTradeTimeSec(newestTrade) ??
+        (() => {
+          const v = newestTrade?.exit_time
+          if (v == null) return 0
+          const n = Number(v)
+          if (!Number.isFinite(n) || n <= 0) return 0
+          return n > 1e12 ? Math.floor(n / 1000) : Math.floor(n)
+        })()
+      if (!Number.isFinite(tradeTime) || tradeTime <= 0) {
+        const n = Number(
+          newestTrade?.time ??
+            newestTrade?.timestamp ??
+            newestTrade?.exit_time ??
+            0
+        )
+        if (Number.isFinite(n) && n > 0) {
+          tradeTime = n > 1e12 ? n / 1000 : n
+        } else {
+          tradeTime = 0
+        }
+      }
+      if (tradeTime > backtestResetTimestamp) {
+        ok = true
+      }
+      if (typeof console !== "undefined" && console.debug) {
+        console.debug("[Backtest start detection]", {
+          tradeTime,
+          backtestResetTimestamp,
+          ok,
+        })
+      }
+    } else {
+      const prog = data?.pnl?.backtest_progress
+      if (prog != null && Number.isFinite(Number(prog))) {
+        const n = Number(prog)
+        if (n > 0 && n < 1) ok = true
+        else if (n >= 1) ok = true
+      }
+      if (!ok) {
+        const tc = data?.pnl?.trade_count
+        if (tc != null && Number(tc) > 0) ok = true
+      }
+    }
+  }
+  if (ok) {
+    if (v8IsNewBacktestRun(data) || data?.backtest_running === true) {
+      backtestIdleMode = false
+    }
+    backtestUIHardReset = false
+    backtestLifecycleReady = true
+  }
+  return ok
+}
+
+function resetBacktestPanels() {
+  backtestResetTimestamp = Date.now() / 1000
+  v8PaintToken++
+  backtestUIHardReset = true
+  backtestLifecycleReady = false
+  backtestResetActive = true
+  if (v8BacktestResetFailsafeTimer != null) {
+    clearTimeout(v8BacktestResetFailsafeTimer)
+    v8BacktestResetFailsafeTimer = null
+  }
+  v8BacktestResetFailsafeTimer = setTimeout(() => {
+    backtestResetActive = false
+    backtestUIHardReset = false
+    v8BacktestResetFailsafeTimer = null
+  }, 5000)
+
+  resetBacktestPnL()
+  resetBacktestSummary()
+
+  // clear trade memory
+  recentTrades = []
+  tradeHistory = []
+  executionHistory = []
+  lastTrades = []
+  lastExecution = []
+
+  lastMetricsSummary = null
+  lastBacktestSummary = null
+  lastPnl = null
+  lastDrawdown = null
+  lastEquity = null
+
+  const tradeTbody = document.querySelector("#trade_history_v8 tbody")
+  if (tradeTbody) {
+    tradeTbody.innerHTML = ""
+  }
+  const execTbody = document.querySelector("#execution_history_v8 tbody")
+  if (execTbody) {
+    execTbody.innerHTML = ""
+  }
+
+  equityHistory = []
+  lastEquityChartKey = ""
+
+  lastTradeRowTimeSec = 0
+  lastExecRowTimeSec = -1
+  v8TradeHistoryCleared = false
+
+  lastDashboardPayload = null
+}
+
 async function onSessionSelectionChanged() {
   const select = document.getElementById("session_select")
   const dual = document.getElementById("dual_panel_toggle")
@@ -1036,8 +1294,28 @@ async function onSessionSelectionChanged() {
   v8TradeHistoryCleared = false
   lastExecRowTimeSec = -1
   lastEquityChartKey = ""
+  if (selectedDashboardSession === "backtest") {
+    backtestIdleMode = true
+    resetBacktestPanels()
+    delete dashboardSessionCache["backtest"]
+  }
   await loadSessionConfig()
-  await loadDashboard()
+  const cached = dashboardSessionCache[selectedDashboardSession]
+  if (cached) {
+    if (String(selectedDashboardSession).toLowerCase() === "backtest") {
+      resetBacktestPanels()
+      delete dashboardSessionCache["backtest"]
+      await loadDashboard()
+    } else {
+      lastDashboardPayload = cached
+      void refreshSessionStatuses()
+      scheduleV8DashboardPaint(() => {
+        v8PaintDashboardPayload(cached)
+      })
+    }
+  } else {
+    await loadDashboard()
+  }
   if (v8TradesHistoryPollActive()) await updateTrades(true)
   if (v8ExecHistoryPollActive()) await updateExecutionHistory()
   applyDashboardModeVisibility()
@@ -1164,28 +1442,31 @@ document.addEventListener("DOMContentLoaded", function(){
       console.warn("[control panel] initial balance apply failed:", e?.message || e)
     }
   })
+
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden) return
+    prefetchOtherSessions()
+  })
 })
 
-async function loadDashboard(){
-
-try{
-const requestId = ++dashboardRequestId
-await refreshSessionStatuses()
-updateHeaderRunning()
-
-const res = await fetch(`/api/dashboard?${getSessionQueryParams()}`)
-
-if(!res.ok) return
-
-const data = await res.json()
-if(requestId !== dashboardRequestId) return
-
-if(!data) return
-
-lastDashboardPayload = data
-
-scheduleV8DashboardPaint(() => {
-  if (requestId !== dashboardRequestId) return
+function v8PaintDashboardPayload(data) {
+  if (!data) return
+  const paintSel = String(selectedDashboardSession || "").toLowerCase()
+  const paintHint = v8PayloadSessionHint(data)
+  if (paintSel === "backtest" && paintHint && paintHint !== "backtest") {
+    if (typeof console !== "undefined" && console.debug) {
+      console.debug("[V8] skip paint stale session", paintHint)
+    }
+    return
+  }
+  if (
+    paintSel === "backtest" &&
+    !v8BacktestDashboardLooksStarted(data) &&
+    backtestResetActive
+  ) {
+    return
+  }
+  if (v8SkipIfBacktestHardReset("v8PaintDashboardPayload")) return
   syncMarketHeaderFromConfig(data.config)
 
   updatePosition(data)
@@ -1224,7 +1505,142 @@ scheduleV8DashboardPaint(() => {
   updateExecutionPipeline(data)
   updateV8PipelineBreadcrumb(data)
   updateOrderLifecycle(data)
+  if (String(selectedDashboardSession || "").toLowerCase() === "backtest") {
+    if (
+      selectedDashboardSession === "backtest" &&
+      backtestIdleMode &&
+      !v8IsNewBacktestRun(data)
+    ) {
+      return
+    }
+    updateBacktestSummary(data)
+  }
+}
+
+async function prefetchOtherSessions() {
+  const now = Date.now()
+  if (now - lastPrefetchTime < PREFETCH_COOLDOWN_MS) {
+    return
+  }
+  lastPrefetchTime = now
+  const sessions = ["live", "shadow", "paper", "backtest"]
+  for (const s of sessions) {
+    if (s === selectedDashboardSession) continue
+    const params = new URLSearchParams()
+    params.set("session", s)
+    if (dualPanelModeEnabled) params.set("dual", "1")
+    fetch(`/api/dashboard?${params.toString()}`)
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => {
+        if (d) dashboardSessionCache[s] = d
+      })
+      .catch(() => {})
+  }
+}
+
+async function loadDashboard(){
+
+try{
+const requestId = ++dashboardRequestId
+await refreshSessionStatuses()
+updateHeaderRunning()
+
+const res = await fetch(`/api/dashboard?${getSessionQueryParams()}`)
+
+if(!res.ok) return
+
+const data = await res.json()
+if(requestId !== dashboardRequestId) return
+
+if(!data) return
+
+const sidBt = String(selectedDashboardSession || "").toLowerCase()
+const payloadSession = v8PayloadSessionHint(data)
+
+if (
+  sidBt === "backtest" &&
+  payloadSession &&
+  payloadSession !== "backtest"
+) {
+  if (typeof console !== "undefined" && console.debug) {
+    console.debug("[V8] skip stale payload", payloadSession)
+  }
+  await loadSessionConfig()
+  if (!controlPanelBaselineReady) {
+    applySymbolSelectFromBaseline()
+    controlInitialized = true
+    controlPanelBaselineReady = true
+    refreshControlApplyButtonStates()
+  }
+  return
+}
+
+if (
+  sidBt === "backtest" &&
+  dashboardSessionCache["backtest"] &&
+  !v8BacktestDashboardLooksStarted(data)
+) {
+  if (typeof console !== "undefined" && console.debug) {
+    console.debug("[V8] skip backtest apply: cached entry exists but payload not started")
+  }
+  await loadSessionConfig()
+  if (!controlPanelBaselineReady) {
+    applySymbolSelectFromBaseline()
+    controlInitialized = true
+    controlPanelBaselineReady = true
+    refreshControlApplyButtonStates()
+  }
+  return
+}
+
+if (sidBt === "backtest") {
+  if (v8BacktestDashboardLooksStarted(data)) {
+    backtestResetActive = false
+    if (v8BacktestResetFailsafeTimer != null) {
+      clearTimeout(v8BacktestResetFailsafeTimer)
+      v8BacktestResetFailsafeTimer = null
+    }
+  } else if (backtestResetActive && !backtestLifecycleRefresh) {
+    await loadSessionConfig()
+    if (!controlPanelBaselineReady) {
+      applySymbolSelectFromBaseline()
+      controlInitialized = true
+      controlPanelBaselineReady = true
+      refreshControlApplyButtonStates()
+    }
+    return
+  }
+}
+
+if (sidBt === "backtest" && v8SkipIfBacktestHardReset("loadDashboard")) {
+  await loadSessionConfig()
+  if (!controlPanelBaselineReady) {
+    applySymbolSelectFromBaseline()
+    controlInitialized = true
+    controlPanelBaselineReady = true
+    refreshControlApplyButtonStates()
+  }
+  return
+}
+
+if (
+  sidBt === "backtest" &&
+  backtestResetActive &&
+  !v8BacktestDashboardLooksStarted(data) &&
+  !backtestLifecycleRefresh
+) {
+  return
+}
+
+lastDashboardPayload = data
+dashboardSessionCache[selectedDashboardSession] = data
+
+scheduleV8DashboardPaint(() => {
+  if (requestId !== dashboardRequestId) return
+  v8PaintDashboardPayload(data)
 })
+
+prefetchOtherSessions()
 
 await loadSessionConfig()
 
@@ -1469,6 +1885,20 @@ const msg = JSON.parse(event.data)
 // websocket của bạn đôi khi có {type, data}
 const data = msg.data || msg
 
+if (
+  String(selectedDashboardSession || "").toLowerCase() === "backtest" &&
+  v8BacktestDashboardLooksStarted(data)
+) {
+  backtestUIHardReset = false
+  backtestResetActive = false
+  if (v8BacktestResetFailsafeTimer != null) {
+    clearTimeout(v8BacktestResetFailsafeTimer)
+    v8BacktestResetFailsafeTimer = null
+  }
+}
+
+const isHardReset = isBacktestHardReset()
+
 // POSITION
 if(data.position){
 updatePosition(data)
@@ -1481,12 +1911,18 @@ if(data?.observability?.execution_monitor){
 updateExecution(data)
 }
 
-// PNL + risk rule status (risk_status may arrive without pnl)
+// PNL + risk + metrics + backtest summary (repaint only; progress runs below always)
+if(!isHardReset){
 if(data.pnl){
 updatePnL(data)
 }
 if(data.pnl || data.risk_status){
 updateRisk(data)
+}
+updateMetrics(data)
+if (String(selectedDashboardSession || "").toLowerCase() === "backtest") {
+  updateBacktestSummary(data)
+}
 }
 
 // PIPELINE
@@ -1599,6 +2035,313 @@ function updateBacktestProgressDisplay(root) {
   el.innerText = "Backtest Idle"
 }
 
+function v8BacktestTradePnl(t) {
+  const raw = t?.pnl ?? t?.result
+  if (raw === null || raw === undefined) return null
+  const n = Number(raw)
+  return Number.isFinite(n) ? n : null
+}
+
+function v8BacktestTradeTimeSec(t) {
+  const v = t?.time ?? t?.timestamp
+  if (v == null) return null
+  if (typeof v === "number") {
+    return v > 1e12 ? Math.floor(v / 1000) : Math.floor(v)
+  }
+  if (typeof v === "string" && /^\d+$/.test(v)) {
+    const n = Number(v)
+    return n > 1e12 ? Math.floor(n / 1000) : Math.floor(n)
+  }
+  return null
+}
+
+function v8BacktestMaxDrawdownDollars(trades, startBalance) {
+  const sb = Number(startBalance)
+  if (!Number.isFinite(sb) || sb <= 0) return null
+  if (!Array.isArray(trades) || trades.length === 0) return null
+  const sorted = [...trades].sort((a, b) => {
+    const ta = v8BacktestTradeTimeSec(a) ?? 0
+    const tb = v8BacktestTradeTimeSec(b) ?? 0
+    return ta - tb
+  })
+  let eq = sb
+  let peak = eq
+  let maxDd = 0
+  for (const t of sorted) {
+    const p = v8BacktestTradePnl(t)
+    if (p == null) continue
+    eq += p
+    if (eq > peak) peak = eq
+    const dd = peak - eq
+    if (dd > maxDd) maxDd = dd
+  }
+  return maxDd > 0 ? maxDd : null
+}
+
+function v8FormatDurationSec(totalSec) {
+  if (totalSec == null || !Number.isFinite(totalSec) || totalSec < 0) return "—"
+  if (totalSec < 60) return `${Math.round(totalSec)}s`
+  const m = Math.floor(totalSec / 60)
+  if (m < 60) return `${m}m ${Math.round(totalSec % 60)}s`
+  const h = Math.floor(m / 60)
+  if (h < 48) return `${h}h ${m % 60}m`
+  const d = Math.floor(h / 24)
+  return `${d}d ${h % 24}h`
+}
+
+function v8ComputeWinLossStreaksFromTrades(trades) {
+  if (!Array.isArray(trades) || trades.length === 0) {
+    return { maxWin: null, maxLoss: null }
+  }
+  const sorted = [...trades]
+    .map((t, i) => ({ t, pnl: v8BacktestTradePnl(t), i }))
+    .filter((x) => x.pnl !== null)
+    .sort((a, b) => {
+      const ta = v8BacktestTradeTimeSec(a.t)
+      const tb = v8BacktestTradeTimeSec(b.t)
+      if (ta != null && tb != null && ta !== tb) return ta - tb
+      return a.i - b.i
+    })
+  let maxW = 0
+  let maxL = 0
+  let curW = 0
+  let curL = 0
+  for (const x of sorted) {
+    if (x.pnl > 0) {
+      curW += 1
+      curL = 0
+      maxW = Math.max(maxW, curW)
+    } else if (x.pnl < 0) {
+      curL += 1
+      curW = 0
+      maxL = Math.max(maxL, curL)
+    } else {
+      curW = 0
+      curL = 0
+    }
+  }
+  return { maxWin: maxW > 0 ? maxW : null, maxLoss: maxL > 0 ? maxL : null }
+}
+
+function computeBacktestSummary(trades) {
+  if (selectedDashboardSession === "backtest" && backtestResetActive) {
+    return null
+  }
+  if (isBacktestHardReset()) return null
+  return v8ComputeWinLossStreaksFromTrades(trades)
+}
+
+function v8BtSumRow(label, value) {
+  const v =
+    value === null || value === undefined || value === "" ? "—" : String(value)
+  return `<div class="v8-kv"><span class="k">${label}</span><span class="v mono">${v}</span></div>`
+}
+
+function updateBacktestSummary(data) {
+  if (!data) return
+  if (
+    selectedDashboardSession === "backtest" &&
+    backtestIdleMode &&
+    !v8IsNewBacktestRun(data)
+  ) {
+    return
+  }
+  if (
+    Array.isArray(data.recent_trades) &&
+    data.recent_trades.length > 0 &&
+    (selectedDashboardSession !== "backtest" ||
+      !backtestResetActive ||
+      v8BacktestDashboardLooksStarted(data))
+  ) {
+    if (!backtestIdleMode || selectedDashboardSession !== "backtest") {
+      recentTrades = data.recent_trades
+    }
+  }
+
+  if (
+    selectedDashboardSession === "backtest" &&
+    backtestResetActive &&
+    (!recentTrades || recentTrades.length === 0)
+  ) {
+    return
+  }
+  if (v8SkipIfBacktestHardReset("updateBacktestSummary")) return
+  const root = document.getElementById("v8_backtest_summary_root")
+  if (!root) return
+  const cfg = data?.config || {}
+  const pnl = data?.pnl || {}
+  const metrics = {
+    ...(lastMetricsSummary || {}),
+    ...(data?.metrics && typeof data.metrics === "object" ? data.metrics : {}),
+  }
+  const risk = data?.risk_status || {}
+  const trades = Array.isArray(data?.recent_trades) ? data.recent_trades : []
+
+  const sym = pnl.symbol || cfg.symbol || "—"
+  const tf = cfg.test_timeframe || cfg.timeframe || "—"
+
+  const timeSecs = trades.map(v8BacktestTradeTimeSec).filter((n) => n != null && n > 0)
+  const startTs = timeSecs.length ? Math.min(...timeSecs) : null
+  const endTs = timeSecs.length ? Math.max(...timeSecs) : null
+  const fmtDate = (ts) =>
+    ts != null
+      ? new Date(ts * 1000).toLocaleDateString(undefined, { dateStyle: "medium" })
+      : "—"
+
+  let totalTrades = "—"
+  if (pnl.trade_count != null && pnl.trade_count !== "") {
+    totalTrades = String(pnl.trade_count)
+  } else if (metrics.total_trades != null && metrics.total_trades !== "") {
+    totalTrades = String(metrics.total_trades)
+  } else if (trades.length) {
+    totalTrades = String(trades.length)
+  }
+
+  const wr = Number(metrics.win_rate)
+  const wrStr = Number.isFinite(wr) ? `${(wr * 100).toFixed(1)}%` : "—"
+  const pf = metrics.profit_factor
+  const pfStr =
+    pf != null && Number.isFinite(Number(pf)) ? formatNumber(Number(pf)) : "—"
+
+  const avgWin = Number(metrics.avg_win)
+  const avgLoss = Number(metrics.avg_loss)
+  let expectancy = "—"
+  if (Number.isFinite(wr) && Number.isFinite(avgWin) && Number.isFinite(avgLoss)) {
+    const e = wr * avgWin + (1 - wr) * avgLoss
+    expectancy = Number.isFinite(e) ? formatCurrency(e) : "—"
+  }
+
+  const streakPack = computeBacktestSummary(trades) || { maxWin: null, maxLoss: null }
+  const { maxWin, maxLoss } = streakPack
+  const maxWinStr = maxWin != null ? String(maxWin) : "—"
+  const maxLossStr = maxLoss != null ? String(maxLoss) : "—"
+
+  const mddRaw = pnl.max_drawdown
+  const mddStr =
+    mddRaw != null && Number.isFinite(Number(mddRaw))
+      ? `${(Number(mddRaw) * 100).toFixed(2)}%`
+      : "—"
+
+  const blocked = Array.isArray(risk.blocked_rules) ? risk.blocked_rules : []
+  const ddLockCount = blocked.filter((x) => /equity|drawdown|dd/i.test(String(x))).length
+  const ddLockStr = ddLockCount > 0 ? String(ddLockCount) : "—"
+
+  let largestLoss = "—"
+  const lossPnls = trades.map(v8BacktestTradePnl).filter((n) => n != null && n < 0)
+  if (lossPnls.length) {
+    largestLoss = formatCurrency(Math.min(...lossPnls))
+  }
+
+  const awStr =
+    Number.isFinite(avgWin) && avgWin !== 0 ? formatCurrency(avgWin) : "—"
+  const alStr =
+    Number.isFinite(avgLoss) && avgLoss !== 0 ? formatCurrency(avgLoss) : "—"
+  let rr = "—"
+  if (Number.isFinite(avgWin) && Number.isFinite(avgLoss) && avgLoss !== 0) {
+    const ratio = avgWin / Math.abs(avgLoss)
+    rr = Number.isFinite(ratio) ? formatNumber(ratio) : "—"
+  }
+
+  const startBalRaw =
+    pnl.start_balance ??
+    document.getElementById("initial_balance")?.value ??
+    cfg.initial_balance
+  const startBal = Number(startBalRaw)
+  const startBalOk = Number.isFinite(startBal) && startBal > 0
+
+  let netProfit = Number(pnl.realized_pnl)
+  if (!Number.isFinite(netProfit)) {
+    netProfit = trades.reduce((s, t) => s + (v8BacktestTradePnl(t) ?? 0), 0)
+  }
+
+  let maxDdDollars = startBalOk ? v8BacktestMaxDrawdownDollars(trades, startBal) : null
+  if (maxDdDollars == null && startBalOk && mddRaw != null && Number.isFinite(Number(mddRaw))) {
+    const frac = Math.abs(Number(mddRaw))
+    if (frac > 0) maxDdDollars = frac * startBal
+  }
+
+  let recoveryStr = "—"
+  if (maxDdDollars != null && maxDdDollars > 1e-9) {
+    const rf = netProfit / maxDdDollars
+    recoveryStr = Number.isFinite(rf) ? formatNumber(rf) : "—"
+  } else if (Number.isFinite(netProfit) && netProfit !== 0 && (maxDdDollars == null || maxDdDollars <= 1e-9)) {
+    recoveryStr = netProfit > 0 ? "∞" : "—"
+  }
+
+  const durSec =
+    startTs != null && endTs != null && endTs >= startTs ? endTs - startTs : null
+  const durationStr = v8FormatDurationSec(durSec)
+
+  const tradeCountNum = Number(totalTrades)
+  const nTradesOk = Number.isFinite(tradeCountNum)
+  let tradesPerDayStr = "—"
+  if (nTradesOk && durSec != null && durSec > 0) {
+    const days = durSec / 86400
+    const tpd = days >= 1 / 8640 ? tradeCountNum / Math.max(days, 1 / 8640) : tradeCountNum
+    tradesPerDayStr = Number.isFinite(tpd) ? formatNumber(tpd) : "—"
+  } else if (nTradesOk && durSec === 0 && tradeCountNum > 0) {
+    tradesPerDayStr = "—"
+  }
+
+  let longCt = 0
+  let shortCt = 0
+  for (const t of trades) {
+    const side = String(t?.side ?? "").toUpperCase()
+    if (side === "LONG" || side === "BUY") longCt += 1
+    else if (side === "SHORT" || side === "SELL") shortCt += 1
+  }
+  const longStr = trades.length ? String(longCt) : "—"
+  const shortStr = trades.length ? String(shortCt) : "—"
+
+  root.innerHTML = `
+    <div class="v8-backtest-summary-grid">
+      <div class="v8-backtest-summary-col">
+        <h3 class="v8-backtest-summary-heading">Test info</h3>
+        ${v8BtSumRow("Symbol", String(sym).toUpperCase())}
+        ${v8BtSumRow("Timeframe", tf)}
+        ${v8BtSumRow("Start date", fmtDate(startTs))}
+        ${v8BtSumRow("End date", fmtDate(endTs))}
+        ${v8BtSumRow("Total trades", totalTrades)}
+      </div>
+      <div class="v8-backtest-summary-col">
+        <h3 class="v8-backtest-summary-heading">Performance</h3>
+        ${v8BtSumRow("Win rate", wrStr)}
+        ${v8BtSumRow("Profit factor", pfStr)}
+        ${v8BtSumRow("Expectancy", expectancy)}
+      </div>
+      <div class="v8-backtest-summary-col">
+        <h3 class="v8-backtest-summary-heading">Streaks</h3>
+        ${v8BtSumRow("Max win streak", maxWinStr)}
+        ${v8BtSumRow("Max loss streak", maxLossStr)}
+      </div>
+      <div class="v8-backtest-summary-col">
+        <h3 class="v8-backtest-summary-heading">Risk</h3>
+        ${v8BtSumRow("Max drawdown", mddStr)}
+        ${v8BtSumRow("DD lock count", ddLockStr)}
+        ${v8BtSumRow("Largest loss", largestLoss)}
+      </div>
+      <div class="v8-backtest-summary-col">
+        <h3 class="v8-backtest-summary-heading">Trade quality</h3>
+        ${v8BtSumRow("Avg win", awStr)}
+        ${v8BtSumRow("Avg loss", alStr)}
+        ${v8BtSumRow("Risk reward", rr)}
+      </div>
+      <div class="v8-backtest-summary-col">
+        <h3 class="v8-backtest-summary-heading">Stability</h3>
+        ${v8BtSumRow("Recovery factor", recoveryStr)}
+        ${v8BtSumRow("Trades per day", tradesPerDayStr)}
+        ${v8BtSumRow("Test duration", durationStr)}
+      </div>
+      <div class="v8-backtest-summary-col">
+        <h3 class="v8-backtest-summary-heading">Trade distribution</h3>
+        ${v8BtSumRow("Long trades", longStr)}
+        ${v8BtSumRow("Short trades", shortStr)}
+      </div>
+    </div>
+  `
+  recentTrades = trades
+}
+
 function pnlRenderOnePanel(panel, root){
 const modeLine = pnlModeLine(panel, root)
 const sym = pnlFmtStr(panel?.symbol, "—")
@@ -1620,6 +2363,7 @@ Total Equity: ${total}<br>
 }
 
 function updateAccountBalanceOnly(data) {
+  if (v8SkipIfBacktestHardReset("updateAccountBalanceOnly")) return
   const pnl = data?.pnl
   const el = document.getElementById("pnl")
   const pnlPanelHidden = v8PanelHiddenById("v8-panel-pnl")
@@ -1700,11 +2444,34 @@ function updateAccountBalanceOnly(data) {
 }
 
 function updatePnL(data) {
+  if (
+    selectedDashboardSession === "backtest" &&
+    backtestIdleMode &&
+    !v8IsNewBacktestRun(data)
+  ) {
+    return
+  }
+  if (
+    String(selectedDashboardSession || "").toLowerCase() === "backtest" &&
+    backtestResetActive &&
+    (!recentTrades || recentTrades.length === 0)
+  ) {
+    return
+  }
+  if (v8SkipIfBacktestHardReset("updatePnL")) return
   if (v8SessionMetricsActive()) {
     updateAccountBalanceOnly(data)
     return
   }
   const pnl = data?.pnl
+  if (
+    String(selectedDashboardSession || "").toLowerCase() === "backtest" &&
+    backtestResetActive &&
+    pnl &&
+    pnl.realized_pnl !== 0
+  ) {
+    return
+  }
   const el = document.getElementById("pnl")
   const pnlPanelHidden = v8PanelHiddenById("v8-panel-pnl")
   if (!pnl) {
@@ -1776,6 +2543,7 @@ function updatePnL(data) {
 }
 
 function updateMetrics(data) {
+  if (v8SkipIfBacktestHardReset("updateMetrics")) return
   if (v8SessionMetricsActive()) return
   if (v8PanelHiddenById("v8-panel-metrics")) return
   const el = document.getElementById("metrics")
@@ -1857,6 +2625,7 @@ function v8TrimTradeTbody(tbody) {
 async function updateTrades(forceReload = false) {
   const table = document.querySelector("#trade_history_v8 tbody")
   if (!table || !v8TradesHistoryPollActive()) return
+  if (v8SkipIfBacktestHardReset("updateTrades")) return
 
   if (v8TradeHistoryCleared && !forceReload) return
 
@@ -1875,6 +2644,8 @@ async function updateTrades(forceReload = false) {
     const limited = all.slice(-V8_HISTORY_MAX_ROWS)
 
     if (!limited.length) {
+      tradeHistory = []
+      lastTrades = []
       scheduleV8DashboardPaint(() => {
         if (requestId !== tradesRequestId) return
         table.innerHTML = `<tr><td colspan="${V8_TRADE_HISTORY_COLS}" class="v8-empty">No trade history</td></tr>`
@@ -1901,6 +2672,8 @@ async function updateTrades(forceReload = false) {
 
     lastTradeRowTimeSec = maxTs
     v8TradeHistoryCleared = false
+    tradeHistory = limited
+    lastTrades = limited
 
     scheduleV8DashboardPaint(() => {
       if (requestId !== tradesRequestId) return
@@ -1922,6 +2695,7 @@ async function updateTrades(forceReload = false) {
 }
 
 function updateEquityChart() {
+  if (v8SkipIfBacktestHardReset("updateEquityChart")) return
   if (v8PanelHiddenById("v8-panel-equity")) return
   const ctx = document.getElementById("equityChart")
   if (!ctx) return
@@ -2087,6 +2861,7 @@ return String(v)
 
 function updateRisk(data) {
   if (v8PanelHiddenById("v8-panel-risk")) return
+  if (v8SkipIfBacktestHardReset("updateRisk")) return
 
 const rs = data?.risk_status
 const pnl = data?.pnl
@@ -2214,6 +2989,7 @@ function updateStrategy(data) {
 }
 
 function updatePerformance(data) {
+  if (v8SkipIfBacktestHardReset("updatePerformance")) return
   if (v8SessionMetricsActive()) return
   if (v8PanelHiddenById("v8-panel-performance")) return
   const el = document.getElementById("performance")
@@ -2236,6 +3012,7 @@ function updatePerformance(data) {
 }
 
 function updateMetricsPanel(payload) {
+  if (v8SkipIfBacktestHardReset("updateMetricsPanel")) return
   const trades = payload.trades ?? payload.total_trades
   lastMetricsSummary = {
     total_trades: trades ?? 0,
@@ -2247,6 +3024,7 @@ function updateMetricsPanel(payload) {
 }
 
 function updatePerformancePanel(payload) {
+  if (v8SkipIfBacktestHardReset("updatePerformancePanel")) return
   if (!lastMetricsSummary) {
     lastMetricsSummary = {}
   }
@@ -2649,6 +3427,16 @@ function clearV8TradeHistoryView() {
   localStorage.setItem(V8_SESSION_METRICS_KEY, "true")
   lastTradeRowTimeSec = 0
   v8TradeHistoryCleared = true
+  recentTrades = []
+  tradeHistory = []
+  lastTrades = []
+  if (selectedDashboardSession !== "backtest") {
+    backtestResetActive = false
+    backtestUIHardReset = false
+  }
+  if (selectedDashboardSession === "backtest") {
+    backtestIdleMode = true
+  }
   tbody.innerHTML = `
     <tr>
       <td colspan="${V8_TRADE_HISTORY_COLS}" class="v8-empty">
@@ -2656,6 +3444,10 @@ function clearV8TradeHistoryView() {
       </td>
     </tr>
   `
+  if (String(selectedDashboardSession || "").toLowerCase() === "backtest") {
+    resetBacktestPanels()
+    delete dashboardSessionCache["backtest"]
+  }
 }
 
 /** Exit session-metrics mode and resume server-backed metrics (optional; e.g. console or future control). */
@@ -2707,6 +3499,7 @@ function v8BuildExecRowTr(t) {
 async function updateExecutionHistory() {
   const table = document.querySelector("#execution_history_v8 tbody")
   if (!table || !v8ExecHistoryPollActive()) return
+  if (v8SkipIfBacktestHardReset("updateExecutionHistory")) return
 
   const placeholder = (msg) => {
     table.innerHTML = `<tr><td colspan="${V8_EXEC_HISTORY_COLS}" class="v8-table-placeholder">${msg}</td></tr>`
@@ -2718,6 +3511,8 @@ async function updateExecutionHistory() {
     const res = await fetch(`/api/execution/history?${getExecutionHistoryQueryParams()}`)
 
     if (!res.ok) {
+      executionHistory = []
+      lastExecution = []
       placeholder("No execution history available")
       lastExecRowTimeSec = -1
       return
@@ -2730,6 +3525,8 @@ async function updateExecutionHistory() {
     const limited = all.slice(0, V8_HISTORY_MAX_ROWS)
 
     if (!limited.length) {
+      executionHistory = []
+      lastExecution = []
       placeholder("No execution history available")
       lastExecRowTimeSec = -1
       return
@@ -2748,6 +3545,8 @@ async function updateExecutionHistory() {
     if (!newRows.length && !isInitial) return
 
     lastExecRowTimeSec = Math.max(lastExecRowTimeSec, topTs)
+    executionHistory = limited
+    lastExecution = limited
 
     scheduleV8DashboardPaint(() => {
       if (requestId !== executionHistoryRequestId) return
@@ -2769,6 +3568,8 @@ async function updateExecutionHistory() {
     })
   } catch (_e) {
     lastExecRowTimeSec = -1
+    executionHistory = []
+    lastExecution = []
     placeholder("No execution history available")
   }
 }

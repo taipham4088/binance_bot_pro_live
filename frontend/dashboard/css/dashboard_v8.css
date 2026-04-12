@@ -303,6 +303,78 @@ body[data-v8-session="backtest"] .v8-obs-row-a {
   display: none;
 }
 
+/* Backtest: focused layout — PnL + control row, summary, pipeline, history only */
+body.v8-backtest-mode section[aria-label="Execution overview"] {
+  display: none;
+}
+
+body.v8-backtest-mode .v8-row.v8-row-tall.v8-row-3 {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+body.v8-backtest-mode .v8-row-obs.v8-obs-stack {
+  display: none;
+}
+
+body.v8-backtest-mode #v8-panel-equity,
+body.v8-backtest-mode #v8-panel-performance {
+  display: none;
+}
+
+.v8-backtest-summary-wrap {
+  width: 100%;
+  min-width: 0;
+}
+
+.v8-backtest-summary-body {
+  padding-top: 4px;
+}
+
+.v8-backtest-summary-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 16px;
+}
+
+.v8-backtest-summary-col {
+  min-width: 0;
+}
+
+.v8-backtest-summary-heading {
+  margin: 0 0 10px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--v8-muted);
+}
+
+.v8-backtest-empty {
+  font-size: 13px;
+  color: var(--v8-muted);
+  text-align: center;
+  padding: 24px 16px;
+  letter-spacing: 0.02em;
+}
+
+@media (max-width: 1100px) {
+  .v8-backtest-summary-grid {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
+
+@media (max-width: 900px) {
+  .v8-backtest-summary-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 1100px) {
+  body.v8-backtest-mode .v8-row.v8-row-tall.v8-row-3 {
+    grid-template-columns: 1fr;
+  }
+}
+
 @media (max-width: 1100px) {
   .v8-obs-row-a {
     grid-template-columns: 1fr;

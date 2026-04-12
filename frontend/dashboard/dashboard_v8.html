@@ -190,6 +190,20 @@
     </article>
   </section>
 
+  <!-- Backtest-only: full-width summary between control row and pipeline -->
+  <section
+    class="v8-card v8-backtest-summary-wrap"
+    id="v8-panel-backtest-summary"
+    data-v8-modes="backtest"
+    aria-label="Backtest summary"
+  >
+    <div class="v8-card-head">
+      <h2>BACKTEST SUMMARY</h2>
+      <span class="v8-card-icon" aria-hidden="true">◉</span>
+    </div>
+    <div id="v8_backtest_summary_root" class="v8-card-body v8-backtest-summary-body"></div>
+  </section>
+
   <!-- Pipeline full width -->
   <section class="v8-card v8-pipeline-card" id="v8-panel-pipeline" data-v8-modes="live,shadow,paper,backtest">
     <div class="v8-card-head">
@@ -225,7 +239,7 @@
       </aside>
     </div>
     <div class="v8-obs-row-b">
-      <article class="v8-card v8-equity-card" id="v8-panel-equity" data-v8-modes="live,shadow,backtest">
+      <article class="v8-card v8-equity-card" id="v8-panel-equity" data-v8-modes="live,shadow">
         <div class="v8-card-head"><h2>EQUITY CURVE</h2></div>
         <div class="v8-chart-wrap">
           <canvas id="equityChart" height="120"></canvas>
@@ -235,7 +249,7 @@
         <div class="v8-card-head"><h2>METRICS</h2></div>
         <div id="metrics" class="v8-card-body"></div>
       </article>
-      <article class="v8-card" id="v8-panel-performance" data-v8-modes="live,shadow,backtest">
+      <article class="v8-card" id="v8-panel-performance" data-v8-modes="live,shadow">
         <div class="v8-card-head"><h2>PERFORMANCE</h2></div>
         <div id="performance" class="v8-card-body"></div>
       </article>
