@@ -1,8 +1,17 @@
 import pandas as pd
 
-def build_features(df, df_1h,
-                   h1_range_lookback=30,
-                   h1_max_trade_bars=5):
+from trading_core.data.range_trend_profiles import merge_tolerance_for_regime_interval
+
+
+def build_features(
+    df,
+    df_1h,
+    h1_range_lookback=30,
+    h1_max_trade_bars=5,
+    *,
+    regime_interval: str | None = None,
+    regime_merge_tolerance: pd.Timedelta | None = None,
+):
 
     df = df.copy()
     # ===== REMOVE OLD H1 FEATURE COLUMNS =====
@@ -92,14 +101,22 @@ def build_features(df, df_1h,
     df_h1_safe = df_h1_safe.sort_values("time").reset_index(drop=True)
 
     df_h1_safe = df_h1_safe.drop_duplicates("time")
-    
+
+    if regime_merge_tolerance is None:
+        if regime_interval:
+            tol = merge_tolerance_for_regime_interval(regime_interval)
+        else:
+            tol = pd.Timedelta("1h")
+    else:
+        tol = regime_merge_tolerance
+
     df_merge = pd.merge_asof(
         df,
         df_h1_safe,
         on="time",
         direction="backward",
         allow_exact_matches=True,
-        tolerance=pd.Timedelta("1h")
+        tolerance=tol,
     )
     # ===== LIVE-SAFE FFILL =====
 

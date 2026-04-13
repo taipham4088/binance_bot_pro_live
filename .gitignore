@@ -1,3 +1,18 @@
+# Python
+__pycache__/
+*.pyc
+
+# Runtime data
+data/debug/
+data/sessions/
+
+# CSV debug
+*.csv
+
+# OS
+.DS_Store
+Thumbs.db
+
 # ================================
 
 # Python
