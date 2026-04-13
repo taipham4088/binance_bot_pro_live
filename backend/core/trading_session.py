@@ -260,8 +260,16 @@ class TradingSession:
             if hasattr(old_market, "stop"):
                 old_market.stop()
 
-            tf = getattr(old_market, "tf", "5m")
-            new_market = BinanceMarketAdapter(new_symbol, tf)
+            entry_iv = getattr(old_market, "entry_interval", None) or getattr(
+                old_market, "tf", "5m"
+            )
+            reg_iv = getattr(old_market, "regime_interval", "1h")
+            new_market = BinanceMarketAdapter(
+                new_symbol,
+                entry_iv,
+                reg_iv,
+                session_id=getattr(self, "id", None),
+            )
             self.symbol_contexts[new_symbol] = SymbolContext(
                 symbol=new_symbol, market=new_market
             )
@@ -462,7 +470,10 @@ class TradingSession:
                     f"Cannot start session from state {self.status}"
                 )
 
-            if not self._execution_attached:
+            if (
+                not self._execution_attached
+                and self.mode in ("live", "shadow")
+            ):
                 self._attach_execution_stack()
 
             # 1️⃣ SET STATUS
@@ -545,6 +556,14 @@ class TradingSession:
         Stop trading system gracefully.
         """
         try:
+            if self.mode == "backtest":
+                svc = getattr(self, "backtest_service", None)
+                if svc is not None and hasattr(svc, "stop"):
+                    try:
+                        svc.stop()
+                    except Exception as e:
+                        print("[BACKTEST STOP FLAG ERROR]", e)
+
             if self.engine:
                 try:
                     loop = asyncio.get_event_loop()
@@ -947,3 +966,14 @@ class TradingSession:
         if sa is not None and hasattr(sa, "get_equity"):
             return sa.get_equity()
         return 0.0
+
+
+def clear_live_runtime_refs(session) -> None:
+    """
+    After LiveService.stop (or equivalent), drop handles so a new adapter/runner
+    can attach without stale WebSocket or callback lists. Does not clear config,
+    execution graph, or risk state.
+    """
+    session.runner = None
+    session.market = None
+    session.data_feed = None

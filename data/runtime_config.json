@@ -1,5 +1,5 @@
 {
-  "trading_enabled": true,
+  "trading_enabled": false,
   "exchange": "binance",
   "symbol": "BTCUSDT",
   "mode": "paper",

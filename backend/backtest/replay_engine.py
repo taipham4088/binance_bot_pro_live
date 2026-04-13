@@ -1,7 +1,9 @@
 import pandas as pd
 import time
 import threading
-from backend.live.market.live_feature_engine import live_feature_engine
+from typing import Optional
+
+from backend.live.market.live_feature_engine import LiveFeatureEngine
 
 
 class BacktestReplayEngine:
@@ -11,6 +13,7 @@ class BacktestReplayEngine:
         self.running = False
         self.index = 0
         self.thread = None
+        self._replay_feature_engine: Optional[LiveFeatureEngine] = None
 
     # =========================
     # LOAD CSV
@@ -48,6 +51,13 @@ class BacktestReplayEngine:
             print("[BACKTEST] Already running")
             return
 
+        self._replay_feature_engine = LiveFeatureEngine(
+            min_bars=300,
+            session_id="replay",
+            entry_interval="5m",
+            regime_interval="1h",
+        )
+
         self.running = True
 
         self.thread = threading.Thread(
@@ -78,7 +88,8 @@ class BacktestReplayEngine:
                 "volume": row["volume"]
             }
 
-            live_feature_engine.push_candle(candle)
+            if self._replay_feature_engine is not None:
+                self._replay_feature_engine.push_candle(candle)
 
             self.index += 1
 

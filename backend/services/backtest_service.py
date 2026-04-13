@@ -6,6 +6,7 @@ BACKTEST_OUTPUT_DIR = os.path.join("data", "backtest", "output")
 BACKTEST_LATEST_CSV = os.path.join(BACKTEST_OUTPUT_DIR, "backtest_latest.csv")
 
 from trading_core.runners.backtest import prepare_data
+from trading_core.data.range_trend_profiles import normalize_range_trend_engine_key
 from trading_core.runtime.context import RuntimeContext
 from trading_core.engines.dual_engine import DualEngine
 
@@ -25,6 +26,8 @@ def _initial_balance_from_config(config, default: float = 10000.0) -> float:
 
 class BacktestService:
     """CSV backtest using trading_core DualEngine (no StrategyHost ports required)."""
+    def __init__(self):
+        self._stop_requested = False
 
     @staticmethod
     def _remove_latest_csv() -> None:
@@ -41,11 +44,15 @@ class BacktestService:
         df.to_csv(BACKTEST_LATEST_CSV, index=False)
 
     def run(self, session, csv_path):
+        self._stop_requested = False
         print(f"[BACKTEST RUN] session_id={session.id}")
         print(f"[BACKTEST RUN] csv_path={csv_path}")
         os.makedirs(BACKTEST_OUTPUT_DIR, exist_ok=True)
         self._remove_latest_csv()
-        df = prepare_data(csv_path)
+        eng = getattr(session.config, "engine", None)
+        if isinstance(session.config, dict):
+            eng = session.config.get("engine", eng)
+        df = prepare_data(csv_path, engine_key=normalize_range_trend_engine_key(eng))
         print(f"[BACKTEST RUN] rows={len(df)}")
         context = RuntimeContext(session.config)
         initial_balance = _initial_balance_from_config(session.config)
@@ -58,6 +65,10 @@ class BacktestService:
 
         total = len(df)
         for i in range(80, total):
+            if self._stop_requested:
+                print(f"[BACKTEST] stop requested session_id={session.id}")
+                session.status = "STOPPED"
+                break
             engine.on_bar(i, df.iloc[i], df)
 
             upd = {"trade_count": len(engine.trades)}
@@ -72,17 +83,20 @@ class BacktestService:
         for trade in engine.trades:
             session.state_bus.on_trade(trade)
 
-        session.state_bus.on_status(
-            {
-                "backtest_progress": 1.0,
-                "trade_count": len(engine.trades),
-            }
-        )
-        session.state_bus.on_equity(total, account.get_equity())
-
-        session.status = "FINISHED"
+        if session.status != "STOPPED":
+            session.state_bus.on_status(
+                {
+                    "backtest_progress": 1.0,
+                    "trade_count": len(engine.trades),
+                }
+            )
+            session.state_bus.on_equity(total, account.get_equity())
+            session.status = "FINISHED"
         self._write_latest_csv(engine.trades)
         return engine.trades, session.state_bus.snapshot()
+
+    def stop(self):
+        self._stop_requested = True
 
     def export(self, session):
         if not getattr(session, "engine", None):

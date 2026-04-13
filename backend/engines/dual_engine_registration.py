@@ -17,5 +17,8 @@ def _register_if_missing(name, factory):
         engine_registry.register(name, factory)
 
 
-# Single production strategy: Range Trend (dual-sided breakout/retest + H1 regime).
+# Range Trend family: same DualEngine; market/feature layer supplies entry vs regime TF.
 _register_if_missing("range_trend", range_trend_engine_factory)
+_register_if_missing("range_trend_1m", range_trend_engine_factory)
+_register_if_missing("range_trend_15m", range_trend_engine_factory)
+_register_if_missing("range_trend_1h", range_trend_engine_factory)

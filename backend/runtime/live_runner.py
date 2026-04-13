@@ -11,14 +11,15 @@ class LiveRunner(threading.Thread):
         self.session = session
         self.market = market
         self.running = False
-        
+        self._candle_subscriber = None
+
         # event queue
         self.queue = queue.Queue(maxsize=1000)
 
     def run(self):
         self.running = True
         self.session.status = "RUNNING"
-        print("[LIVE RUNNER START]")
+        print("[LIVE RUNNER START]", f"runner_id={id(self)}")
         print("trade_mode =", getattr(self.session.config, "trade_mode", None))
         print("risk =", getattr(self.session.config, "risk_per_trade", None))
         
@@ -38,8 +39,9 @@ class LiveRunner(threading.Thread):
                 print("[LIVE RUNNER] queue overflow")    
                         
         # 🔌 subscribe qua market port
+        self._candle_subscriber = on_candle
         self.market.subscribe_candle(on_candle)
-       
+
         # ===== RUNNER LOOP =====
         while self.running:
 
@@ -86,5 +88,34 @@ class LiveRunner(threading.Thread):
             if getattr(self.session, "try_apply_pending_symbol", None):
                 self.session.try_apply_pending_symbol()
 
+        sid = getattr(self.session, "id", None)
+        print(
+            "[LIVE RUNNER END]",
+            f"runner_id={id(self)}",
+            f"session={sid!r}",
+        )
+
     def stop(self):
+        print(
+            "[RUNNER STOP]",
+            f"runner_id={id(self)}",
+            "thread_alive=",
+            self.is_alive(),
+        )
         self.running = False
+        market = getattr(self, "market", None)
+        cb = getattr(self, "_candle_subscriber", None)
+        if market is not None and cb is not None and hasattr(
+            market, "unsubscribe_candle"
+        ):
+            try:
+                market.unsubscribe_candle(cb)
+            except Exception:
+                pass
+        self._candle_subscriber = None
+        print(
+            "[RUNNER STOP]",
+            f"runner_id={id(self)}",
+            "after_unsubscribe thread_alive=",
+            self.is_alive(),
+        )

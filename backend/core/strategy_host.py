@@ -1,18 +1,12 @@
 from trading_core.runtime.context import RuntimeContext
+from trading_core.data.range_trend_profiles import normalize_range_trend_engine_key
 from backend.control_plane.engine_registry.engine_registry import engine_registry
 import backend.engines.dual_engine_registration
 from backend.runtime.runtime_config import runtime_config
 
-_LEGACY_STRATEGY_KEYS = frozenset({"range", "trend", "momentum", "dual_engine"})
-
 
 def normalize_strategy_engine_key(name: str | None) -> str:
-    n = (name or "range_trend").strip().lower()
-    if n in _LEGACY_STRATEGY_KEYS:
-        return "range_trend"
-    if n == "range_trend":
-        return "range_trend"
-    return "range_trend"
+    return normalize_range_trend_engine_key(name)
 
 
 class StrategyHost:
@@ -37,10 +31,9 @@ class StrategyHost:
         context = RuntimeContext(config)
 
         engine_type = normalize_strategy_engine_key(
-            runtime_config.get(
-                "strategy",
-                getattr(config, "engine", "range_trend"),
-            )
+            getattr(config, "engine", None)
+            or runtime_config.get("strategy")
+            or "range_trend"
         )
         symbol = (
             getattr(config, "symbol", None)
@@ -55,6 +48,13 @@ class StrategyHost:
             execution=execution,
             account=account,
             symbol=symbol,
+        )
+
+        print(
+            "[ENGINE CREATE]",
+            f"id={id(engine)}",
+            f"registry_key={engine_type!r}",
+            f"type={type(engine).__name__}",
         )
 
         return engine

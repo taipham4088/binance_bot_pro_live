@@ -12,7 +12,12 @@ from backend.runtime.session_config_store import (
     load_control_config_merged,
     save_control_config_merge,
 )
-from backend.core.trading_session import canonical_session_id, mode_defers_execution_bootstrap
+from backend.core.trading_session import (
+    canonical_session_id,
+    clear_live_runtime_refs,
+    mode_defers_execution_bootstrap,
+)
+from backend.services.live_service import LiveService
 from backend.services.paper_service import PaperService
 from backend.services.backtest_service import BacktestService
 
@@ -32,6 +37,7 @@ def _backtest_csv_path(session) -> str:
 
 
 def _spawn_backtest_thread(session) -> None:
+    session.backtest_service = backtest_service
     def run_backtest():
         try:
             csv = _backtest_csv_path(session)
@@ -39,7 +45,8 @@ def _spawn_backtest_thread(session) -> None:
             print(f"[BACKTEST THREAD] csv_path={csv}")
             session.status = "RUNNING"
             backtest_service.run(session=session, csv_path=csv)
-            session.status = "FINISHED"
+            if session.status != "STOPPED":
+                session.status = "FINISHED"
         except Exception as e:
             session.last_error = str(e)
             session.status = "ERROR"
@@ -191,6 +198,37 @@ def _public_control_config_from_stored(stored: dict) -> dict:
     }
 
 
+def _live_apply_config_with_clean_restart(sess, sid: str, merged: dict) -> None:
+    """
+    Live only: stop feed if running, clear runner/market refs, apply stored config,
+    restart LiveService if the session was running (prevents duplicate WS/feature stacks).
+    """
+    print(f"[APPLY CLEAN] start session={sid}")
+    runner = getattr(sess, "runner", None)
+    was_running = runner is not None and getattr(runner, "is_alive", lambda: False)()
+
+    svc = LiveService()
+    if was_running:
+        print(f"[APPLY CLEAN] stop_session session={sid}")
+        svc.stop(sess)
+
+    clear_live_runtime_refs(sess)
+    print(f"[APPLY CLEAN] runtime cleared session={sid}")
+
+    _ensure_engine_config(sess)
+    apply_stored_to_trading_session(sess, merged)
+
+    eng = str(merged.get("strategy") or "range_trend")
+    print(f"[APPLY CLEAN] config applied session={sid} engine={eng}")
+
+    if was_running:
+        sym = str(merged.get("symbol") or "BTCUSDT").strip().upper() or "BTCUSDT"
+        print(f"[APPLY CLEAN] restart session={sid}")
+        svc.start(sess, sym)
+
+    print(f"[APPLY CLEAN] done session={sid}")
+
+
 def _public_control_config_from_session(session) -> dict:
     """Control-panel fields for dashboard; supports dict or EngineConfig on session.config."""
     c = session.config
@@ -240,6 +278,14 @@ async def update_session_config(
         updates["risk_percent"] = payload["risk_percent"]
     if "strategy" in payload:
         updates["strategy"] = payload["strategy"]
+    if "symbol" in payload and payload["symbol"] is not None:
+        sym = str(payload["symbol"]).strip().upper()
+        if sym:
+            updates["symbol"] = sym
+    if "exchange" in payload and payload["exchange"] is not None:
+        ex = str(payload["exchange"]).strip()
+        if ex:
+            updates["exchange"] = ex
 
     merged = save_control_config_merge(sid, updates)
 
@@ -250,8 +296,11 @@ async def update_session_config(
         print("config_before =", sess.config)
 
     if sess:
-        _ensure_engine_config(sess)
-        apply_stored_to_trading_session(sess, merged)
+        if getattr(sess, "mode", None) == "live":
+            _live_apply_config_with_clean_restart(sess, sid, merged)
+        else:
+            _ensure_engine_config(sess)
+            apply_stored_to_trading_session(sess, merged)
 
     print("[CONTROL PANEL UPDATED]")
     if sess:

@@ -7,10 +7,16 @@ router = APIRouter()
 
 class EngineType(str, Enum):
     range_trend = "range_trend"
+    range_trend_1m = "range_trend_1m"
+    range_trend_15m = "range_trend_15m"
+    range_trend_1h = "range_trend_1h"
 
 
 class EngineProfile(str, Enum):
     range_trend = "range_trend"
+    range_trend_1m = "range_trend_1m"
+    range_trend_15m = "range_trend_15m"
+    range_trend_1h = "range_trend_1h"
 
 
 class PositionMode(str, Enum):

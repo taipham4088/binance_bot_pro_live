@@ -12,6 +12,8 @@ import os
 import threading
 from typing import Any, Dict
 
+from trading_core.data.range_trend_profiles import normalize_range_trend_engine_key
+
 _SAVE_LOCK = threading.Lock()
 
 # Keys written to disk (single source for control API + dashboard config).
@@ -86,6 +88,7 @@ def _load_file_into(target: Dict[str, Any]) -> None:
     _legacy_strategy = frozenset({"range", "trend", "momentum", "dual_engine"})
     if target.get("strategy") in _legacy_strategy:
         target["strategy"] = "range_trend"
+    target["strategy"] = normalize_range_trend_engine_key(target.get("strategy"))
 
 
 def save_runtime_config() -> None:

@@ -14,6 +14,14 @@ from backend.runtime.session_config_store import (
 )
 
 _LEGACY_STRATEGY = frozenset({"range", "trend", "momentum", "dual_engine"})
+_ALLOWED_STRATEGY = frozenset(
+    {
+        "range_trend",
+        "range_trend_1m",
+        "range_trend_15m",
+        "range_trend_1h",
+    }
+)
 
 
 def _normalize_persisted_strategy(value) -> str:
@@ -22,6 +30,8 @@ def _normalize_persisted_strategy(value) -> str:
     n = str(value).strip().lower()
     if n in _LEGACY_STRATEGY:
         return "range_trend"
+    if n in _ALLOWED_STRATEGY:
+        return n
     return "range_trend"
 
 

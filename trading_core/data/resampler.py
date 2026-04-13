@@ -1,7 +1,45 @@
+import pandas as pd
+
+from trading_core.data.range_trend_profiles import pandas_freq_for_binance_interval
+
 try:
     from backend.runtime.runtime_config import runtime_config as _runtime_config
 except Exception:
     _runtime_config = {}
+
+
+def resample_ohlc_from_entry(
+    df: pd.DataFrame,
+    binance_interval: str,
+    *,
+    drop_last_incomplete: bool = True,
+) -> pd.DataFrame:
+    """
+    Aggregate entry-timeframe OHLCV bars into a higher timeframe (regime bars).
+    Matches live pipeline: optional drop of the last (still-forming) entry candle before resampling.
+    """
+    out = df.copy()
+    out["time"] = pd.to_datetime(out["time"])
+    out = out.sort_values("time")
+    if drop_last_incomplete and len(out) > 1:
+        out = out.iloc[:-1]
+    freq = pandas_freq_for_binance_interval(binance_interval)
+    agg = (
+        out.set_index("time")
+        .resample(freq)
+        .agg(
+            {
+                "open": "first",
+                "high": "max",
+                "low": "min",
+                "close": "last",
+                "volume": "sum",
+            }
+        )
+        .dropna()
+        .reset_index()
+    )
+    return agg
 
 
 def _get_reference_timeframe() -> str:
@@ -23,12 +61,4 @@ def build_reference_tf(df):
 
 
 def build_h1(df):
-    df_1h = df.set_index('time').resample('1h').agg({
-        'open':'first',
-        'high':'max',
-        'low':'min',
-        'close':'last',
-        'volume':'sum'
-    }).dropna().reset_index()
-
-    return df_1h
+    return resample_ohlc_from_entry(df, "1h", drop_last_incomplete=True)

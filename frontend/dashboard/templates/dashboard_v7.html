@@ -280,7 +280,10 @@ oninput="pendingButton('initial_balance')"
 <label>Strategy</label>
 
 <select id="strategy_select" onchange="pendingButton('strategy_select')">
-<option value="range_trend">RANGE TREND</option>
+<option value="range_trend_1m">Range Trend 1m</option>
+<option value="range_trend">Range Trend 5m</option>
+<option value="range_trend_15m">Range Trend 15m</option>
+<option value="range_trend_1h">Range Trend 1h</option>
 </select>
 
 <button onclick="setStrategy(this)">Apply</button>

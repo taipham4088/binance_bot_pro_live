@@ -2,6 +2,7 @@ import logging
 logger = logging.getLogger("LIVE")
 from execution.live_bootstrap import build_live_execution_system
 from backend.adapters.market.binance_market_adapter import BinanceMarketAdapter
+from trading_core.data.range_trend_profiles import range_trend_entry_regime_intervals
 from backend.adapters.account.dummy_account_adapter import DummyAccountAdapter
 from execution.mode_router import ModeRouter
 from backend.runtime.live_runner import LiveRunner
@@ -13,9 +14,15 @@ class LiveService:
     def __init__(self):
         self.host = StrategyHost()
 
-    def start(self, session, symbol: str, timeframe: str):
+    def start(self, session, symbol: str):
         # Idempotency guard: avoid duplicate runner/market wiring per session.
         if getattr(session, "runner", None) and session.runner.is_alive():
+            print(
+                "[LIVE SERVICE START]",
+                "action=skip",
+                f"reason=runner_alive",
+                f"session.strategy_engine_id={id(getattr(session, 'strategy_engine', None))}",
+            )
             return session.id
 
         # Reuse execution stack created by TradingSession.start(); never build a second one.
@@ -48,7 +55,27 @@ class LiveService:
             loop.create_task(live_system.start())
 
         # ===== live ports =====
-        market = BinanceMarketAdapter(symbol, timeframe, session_id=session.id)
+        eng = getattr(session.config, "engine", None) or "range_trend"
+        if isinstance(session.config, dict):
+            eng = session.config.get("engine", eng)
+        entry_iv, reg_iv = range_trend_entry_regime_intervals(str(eng))
+        print(
+            "[LIVE SERVICE START]",
+            "action=build_market",
+            f"config_engine={eng!r}",
+            f"entry_iv={entry_iv!r}",
+            f"reg_iv={reg_iv!r}",
+            f"session.strategy_engine_id={id(getattr(session, 'strategy_engine', None))}",
+        )
+        market = BinanceMarketAdapter(
+            symbol, entry_iv, reg_iv, session_id=session.id
+        )
+        print(
+            "[LIVE ENGINE CREATE - RUNTIME ONLY]",
+            f"session={session.id!r}",
+            f"symbol={symbol!r}",
+            f"feature_engine_id={id(market.feature_engine)}",
+        )
         mode_router = ModeRouter(
             mode=session.config.mode,
             live_system=live_system,
@@ -76,6 +103,13 @@ class LiveService:
             account=account
         )
 
+        print(
+            "[LIVE SERVICE START]",
+            "action=after_create_engine",
+            f"created_engine_id={id(engine)}",
+            f"session.strategy_engine_id={id(getattr(session, 'strategy_engine', None))}",
+            f"attached_same_object={id(engine) == id(getattr(session, 'strategy_engine', None))}",
+        )
 
         session.build(
             engine=engine,  # dùng engine vừa tạo
@@ -95,17 +129,30 @@ class LiveService:
 
         session.status = "STOPPING"
 
-        # stop runner
+        print(
+            "[ENGINE DESTROY]",
+            "(session stop — Python GC will collect unreachable engines)",
+            f"session.strategy_engine_id={id(getattr(session, 'strategy_engine', None))}",
+            f"market_adapter_id={id(getattr(session, 'market', None))}",
+            f"feature_engine_id={id(getattr(getattr(session, 'market', None), 'feature_engine', None))}",
+        )
+
+        # Stop market/WS first so no further push_candle / FEATURE CHECK while runner unwinds.
+        if hasattr(session, "market") and session.market:
+            session.market.stop()
+
         if hasattr(session, "runner") and session.runner:
             session.runner.stop()
 
             if session.runner.is_alive():
                 session.runner.join(timeout=5)
-
-
-        # stop market
-        if hasattr(session, "market") and session.market:
-            session.market.stop()
+            print(
+                "[RUNNER STOP]",
+                "after_join",
+                f"runner_id={id(session.runner)}",
+                "thread_alive=",
+                session.runner.is_alive(),
+            )
 
         # stop health loop
         if hasattr(session, "health_loop") and session.health_loop:
@@ -123,3 +170,12 @@ class LiveService:
                 loop.create_task(session.live_system.stop())
             except RuntimeError:
                 pass
+
+        try:
+            if getattr(session, "system_state", None):
+                session.system_state.stop()
+        except Exception:
+            pass
+
+        stopped = getattr(session, "STATUS_STOPPED", None)
+        session.status = stopped if stopped is not None else "STOPPED"

@@ -29,6 +29,9 @@ class EngineConfig:
     # time
     timezone_offset_hours: int = 7
 
+    # strategy registry key (range_trend, range_trend_1m, …) — DualEngine + market TF profile
+    engine: str = "range_trend"
+
     def __post_init__(self):
         print("[ENGINE CONFIG INIT]")
         print(self.trade_mode)

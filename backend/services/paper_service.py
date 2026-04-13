@@ -1,4 +1,5 @@
 from trading_core.runners.backtest import prepare_data
+from trading_core.data.range_trend_profiles import normalize_range_trend_engine_key
 
 from backend.adapters.market.paper_market_adapter import PaperMarketAdapter
 from backend.adapters.execution.paper_execution_adapter import PaperExecutionAdapter
@@ -15,7 +16,10 @@ class PaperService:
 
     def start(self, session, csv_path, speed=0.2):
 
-        df = prepare_data(csv_path)
+        eng = getattr(session.config, "engine", None)
+        if isinstance(session.config, dict):
+            eng = session.config.get("engine", eng)
+        df = prepare_data(csv_path, engine_key=normalize_range_trend_engine_key(eng))
 
         # ===== init ports =====
         market = PaperMarketAdapter(df, speed=speed)

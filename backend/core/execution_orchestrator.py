@@ -107,16 +107,6 @@ class ExecutionOrchestrator:
                 if signal_price is None and hasattr(intent, "metadata"):
                     signal_price = intent.metadata.get("price")
 
-                # fallback lấy giá market
-                if signal_price is None:
-                    try:
-                        from backend.live.market.live_feature_engine import live_feature_engine
-                        signal_price = live_feature_engine.last_price
-                        print("MARKET PRICE FALLBACK:", signal_price)
-                    except Exception as e:
-                        print("MARKET PRICE ERROR:", e)
-                        signal_price = None
-
                 print("DEBUG INTENT:", intent)
                 print("DEBUG SIGNAL PRICE:", signal_price)
 

@@ -1,5 +1,6 @@
 import requests
 import inspect
+import threading
 
 from trading_core.config.engine_config import EngineConfig
 from fastapi import APIRouter, Request, HTTPException
@@ -11,8 +12,10 @@ from backend.runtime.session_config_store import (
     load_control_config_merged,
 )
 from backend.core.trading_session import canonical_session_id, mode_defers_execution_bootstrap
+from backend.services.backtest_service import BacktestService
 
 router = APIRouter()
+backtest_service = BacktestService()
 
 _ALLOWED_SESSION_MODES = frozenset(
     {"live", "live_shadow", "shadow", "paper", "backtest"}
@@ -105,6 +108,33 @@ async def start_session(request: Request, session_id: str):
     ensure_engine_config(sess)
     apply_stored_to_trading_session(sess, load_control_config_merged(session_id))
 
+    if sess.mode == "backtest":
+        sess.backtest_service = backtest_service
+        def _run_backtest():
+            try:
+                csv = str(getattr(sess, "csv_path", "") or "").strip()
+                if not csv:
+                    csv = "data/backtest/input/futures_BTCUSDT_5m_FULL.csv"
+                print(f"[BACKTEST START] session_id={sess.id}")
+                print(f"[BACKTEST START] csv_path={csv}")
+                sess.status = "RUNNING"
+                backtest_service.run(session=sess, csv_path=csv)
+                if sess.status != "STOPPED":
+                    sess.status = "FINISHED"
+            except Exception as e:
+                sess.last_error = str(e)
+                sess.status = "ERROR"
+                print("[BACKTEST] run failed:", e)
+
+        threading.Thread(
+            target=_run_backtest, daemon=True, name=f"backtest-{sess.id}"
+        ).start()
+        session = sess
+        return {
+            "session_id": session.id,
+            "status": session.status
+        }
+
     session = manager.start_session(session_id)
 
     # 🔥 SET STATUS NGAY LẬP TỨC
@@ -117,7 +147,7 @@ async def start_session(request: Request, session_id: str):
         sym = getattr(session.config, "symbol", None) or runtime_config.get(
             "symbol", "BTCUSDT"
         )
-        service.start(session, symbol=str(sym), timeframe="5m")
+        service.start(session, symbol=str(sym))
 
     return {
         "session_id": session.id,
@@ -137,7 +167,14 @@ async def stop_session(request: Request, session_id: str):
 
         print("[EXECUTION] stopping pipeline")
 
-        # stop strategy/signal loop runner first
+        # Stop market/WS first — no further adapter push_candle while runner stops.
+        market = getattr(session, "market", None) or getattr(session, "data_feed", None)
+        if market and hasattr(market, "stop"):
+            try:
+                market.stop()
+            except Exception as e:
+                print("[EXECUTION] market stop error:", e)
+
         runner = getattr(session, "runner", None)
         if runner:
             try:
@@ -147,14 +184,6 @@ async def stop_session(request: Request, session_id: str):
                 print("[EXECUTION] signal loop stopped")
             except Exception as e:
                 print("[EXECUTION] signal loop stop error:", e)
-
-        # stop websocket/feed
-        market = getattr(session, "market", None) or getattr(session, "data_feed", None)
-        if market and hasattr(market, "stop"):
-            try:
-                market.stop()
-            except Exception as e:
-                print("[EXECUTION] market stop error:", e)
 
         # stop health loop + task
         health_loop = getattr(session, "health_loop", None)

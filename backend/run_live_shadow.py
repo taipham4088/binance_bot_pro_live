@@ -127,10 +127,8 @@ engine.risk_engine = risk_engine
 # =============================
 # LIVE MARKET (BINANCE FUTURES)
 # =============================
-market = BinanceMarketAdapter(
-    symbol=SYMBOL,
-    timeframe=TIMEFRAME
-)
+# Aligns with range_trend profile (5m entry, 1h regime); TIMEFRAME kept for docs only.
+market = BinanceMarketAdapter(SYMBOL, TIMEFRAME or "5m", "1h")
 
 
 print("🚀 LIVE SHADOW FUTURES runner started")

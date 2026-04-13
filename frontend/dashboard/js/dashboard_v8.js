@@ -12,6 +12,12 @@ let skipNextControlPanelRefresh = false
 /** Server-backed values for control rows; pending UI = select/input value !== last applied */
 const lastAppliedControlValues = {}
 let selectedDashboardSession = "live"
+const controlPanelDirty = {
+  live: false,
+  paper: false,
+  shadow: false,
+  backtest: false,
+}
 /** Cached `/api/dashboard` JSON per session for instant tab switches without refetch. */
 const dashboardSessionCache = {}
 let dualPanelModeEnabled = false
@@ -23,11 +29,22 @@ const PREFETCH_COOLDOWN_MS = 15000
 let tradesRequestId = 0
 let executionHistoryRequestId = 0
 const sessionRuntimeStatus = {
-  live: "UNKNOWN",
-  shadow: "UNKNOWN",
-  paper: "UNKNOWN",
-  backtest: "UNKNOWN",
+  live: "STOPPED",
+  shadow: "STOPPED",
+  paper: "STOPPED",
+  backtest: "STOPPED",
 }
+
+/** From `/api/system/sessions` (mode + status); used so Control Panel matches Session modal. */
+const sessionsRuntime = {
+  live: { running: false },
+  shadow: { running: false },
+  paper: { running: false },
+  backtest: { running: false },
+}
+
+/** Last known server `config.trading_enabled` for pause/resume when a session is running. */
+let lastControlTradingEnabled = true
 
 /** Latest /api/dashboard/metrics payload for V8 summary cards (PnL profit factor, etc.). */
 let lastMetricsSummary = null
@@ -207,6 +224,17 @@ function v8Dash(v) {
   if (v === null || v === undefined || v === "") return "—"
   if (typeof v === "number" && Number.isNaN(v)) return "—"
   return String(v)
+}
+
+/** Human-readable strategy name; internal keys (e.g. range_trend) unchanged in API payloads. */
+function v8StrategyLabel(key) {
+  if (key === null || key === undefined || key === "") return "—"
+  const k = String(key).trim().toLowerCase()
+  if (k === "range_trend") return "Range Trend 5m"
+  if (k === "range_trend_1m") return "Range Trend 1m"
+  if (k === "range_trend_15m") return "Range Trend 15m"
+  if (k === "range_trend_1h") return "Range Trend 1h"
+  return String(key)
 }
 
 /** Trade history PnL / fee display: fixed 2 decimals (deterministic; NaN → "0.00"). */
@@ -576,7 +604,7 @@ function applyDashboardModeVisibility(mode) {
 function updateHeaderRunning() {
   const el = document.getElementById("mh-running")
   if (!el) return
-  const st = sessionRuntimeStatus[selectedDashboardSession] || "UNKNOWN"
+  const st = sessionRuntimeStatus[selectedDashboardSession] || "STOPPED"
   el.textContent = st
   el.classList.remove("running", "stopped", "unknown", "finished", "error")
   if (st === "RUNNING") el.classList.add("running")
@@ -584,17 +612,15 @@ function updateHeaderRunning() {
   else if (st === "STOPPED") el.classList.add("stopped")
   else if (st === "FINISHED") el.classList.add("finished")
   else if (st === "ERROR") el.classList.add("error")
-  else el.classList.add("unknown")
+  else el.classList.add("stopped")
 }
 
 function syncMarketHeaderFromConfig(cfg) {
   if (!cfg) return
   const symEl = document.getElementById("mh-symbol")
   const exEl = document.getElementById("mh-exchange")
-  const modeEl = document.getElementById("mh-mode")
   if (symEl && cfg.symbol) symEl.textContent = String(cfg.symbol).toUpperCase()
   if (exEl && cfg.exchange) exEl.textContent = String(cfg.exchange).toUpperCase()
-  if (modeEl && cfg.mode != null) modeEl.textContent = String(cfg.mode).toUpperCase()
 }
 
 function adjustRisk(delta) {
@@ -614,7 +640,16 @@ function normalizeDashboardTradeMode(v) {
   return "dual"
 }
 
-function normalizeDashboardStrategy(_v) {
+const V8_ALLOWED_STRATEGIES = new Set([
+  "range_trend",
+  "range_trend_1m",
+  "range_trend_15m",
+  "range_trend_1h",
+])
+
+function normalizeDashboardStrategy(v) {
+  const s = String(v || "").trim().toLowerCase()
+  if (V8_ALLOWED_STRATEGIES.has(s)) return s
   return "range_trend"
 }
 
@@ -802,6 +837,41 @@ async function postSessionControl(path) {
   return res.json().catch(() => ({}))
 }
 
+/** Browser console trace for session modal (system API paths only). */
+function v8UiSessionLog(tag, sessionId) {
+  console.log(`[UI ${tag}] ${String(sessionId || "").toLowerCase()}`)
+}
+
+/**
+ * Session lifecycle via POST /api/system/session/* (not /api/session/*).
+ * Restart = stop then start (no dedicated restart route on system router).
+ */
+async function runDashboardSessionLifecycle(sid, action) {
+  const s = String(sid || "").toLowerCase()
+  if (action === "create") {
+    v8UiSessionLog("CREATE", s)
+    await ensureSessionCreated(s)
+    return
+  }
+  if (action === "start") {
+    v8UiSessionLog("START", s)
+    await startSession(s)
+    return
+  }
+  if (action === "stop") {
+    v8UiSessionLog("STOP", s)
+    await stopSession(s)
+    return
+  }
+  if (action === "restart") {
+    v8UiSessionLog("RESTART", s)
+    await stopSession(s)
+    await startSession(s)
+    return
+  }
+  throw new Error(`Unsupported session action: ${action}`)
+}
+
 document.addEventListener("click", async (e) => {
   const t = e.target
   const session = t.dataset?.session
@@ -873,49 +943,39 @@ document.addEventListener("click", async (e) => {
     return
   }
 
-  try {
-    if (action === "start") {
-      await ensureSessionCreated(sid)
-    }
-    const res = await fetch(`/api/session/${action}`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        mode: sid,
-      }),
-    })
-    if (!res.ok) {
-      let detail = ""
-      try {
-        const body = await res.json()
-        detail = body?.detail != null ? `: ${body.detail}` : ""
-      } catch (_err) {
-        detail = ""
+  if (
+    action === "create" ||
+    action === "start" ||
+    action === "stop" ||
+    action === "restart"
+  ) {
+    try {
+      await runDashboardSessionLifecycle(sid, action)
+      const sidLc = String(sid || "").toLowerCase()
+      if (sidLc === "backtest" && (action === "restart" || action === "start")) {
+        resetBacktestPanels()
+        delete dashboardSessionCache["backtest"]
+        backtestLifecycleRefresh = true
       }
+      if (
+        v8TradeScopedMode(sidLc) &&
+        (action === "start" || action === "restart")
+      ) {
+        sessionTradeStartSec[sidLc] = Math.floor(Date.now() / 1000)
+        lastTradeRowTimeSec = 0
+        v8TradeHistoryCleared = false
+      }
+      sessionControlStatus(`${action.toUpperCase()} ${sid.toUpperCase()} ok`)
+      await refreshSessionStatuses()
+      await refreshAfterLifecycleAction()
+    } catch (err) {
       sessionControlStatus(
-        `${action.toUpperCase()} ${sid.toUpperCase()} failed — HTTP ${res.status}${detail}`,
+        `${action.toUpperCase()} ${sid.toUpperCase()} failed — ${err?.message || err}`,
         true
       )
       await refreshSessionStatuses()
-      return
     }
-    const sidLc = String(sid || "").toLowerCase()
-    if (v8TradeScopedMode(sidLc) && action === "start") {
-      sessionTradeStartSec[sidLc] = Math.floor(Date.now() / 1000)
-      lastTradeRowTimeSec = 0
-      v8TradeHistoryCleared = false
-    }
-    sessionControlStatus(`${action.toUpperCase()} ${sid.toUpperCase()} ok`)
-    await refreshSessionStatuses()
-    await refreshAfterLifecycleAction()
-  } catch (err) {
-    sessionControlStatus(
-      `${action.toUpperCase()} ${sid.toUpperCase()} failed — ${err?.message || err}`,
-      true
-    )
-    await refreshSessionStatuses()
+    return
   }
 })
 
@@ -945,49 +1005,6 @@ async function startSession(sessionId) {
 
 async function stopSession(sessionId) {
   return postSessionControl(`/api/system/session/stop/${encodeURIComponent(sessionId)}`)
-}
-
-async function sessionAction(sessionId, action, btn) {
-  const original = btn ? btn.textContent : ""
-  try {
-    if (btn) {
-      btn.disabled = true
-      btn.textContent = "..."
-    }
-    sessionControlStatus(`${action.toUpperCase()} ${sessionId.toUpperCase()} in progress...`)
-    if (action === "start") {
-      await startSession(sessionId)
-    } else if (action === "stop") {
-      await stopSession(sessionId)
-    } else if (action === "restart") {
-      await stopSession(sessionId)
-      await startSession(sessionId)
-    } else {
-      throw new Error(`Unsupported action: ${action}`)
-    }
-    const sessionLc = String(sessionId || "").toLowerCase()
-    if (sessionLc === "backtest" && (action === "restart" || action === "start")) {
-      resetBacktestPanels()
-      delete dashboardSessionCache["backtest"]
-      backtestLifecycleRefresh = true
-    }
-    if (v8TradeScopedMode(sessionLc) && action === "start") {
-      sessionTradeStartSec[sessionLc] = Math.floor(Date.now() / 1000)
-      lastTradeRowTimeSec = 0
-      v8TradeHistoryCleared = false
-    }
-    sessionControlStatus(`${action.toUpperCase()} ${sessionId.toUpperCase()} success`)
-    await refreshSessionStatuses()
-    await refreshAfterLifecycleAction()
-  } catch (e) {
-    sessionControlStatus(`${action.toUpperCase()} ${sessionId.toUpperCase()} failed - ${e.message}`, true)
-    await refreshSessionStatuses()
-  } finally {
-    if (btn) {
-      btn.disabled = false
-      btn.textContent = original
-    }
-  }
 }
 
 async function exportCandle(session) {
@@ -1059,23 +1076,70 @@ function riskPercentInputToFraction(raw) {
   return n / 100
 }
 
+function getActiveSessionId() {
+  const sid = String(selectedDashboardSession || "live").toLowerCase()
+  if (!Object.prototype.hasOwnProperty.call(controlPanelDirty, sid)) {
+    controlPanelDirty[sid] = false
+  }
+  return sid
+}
+
+function showDirtyIndicator() {
+  document.getElementById("control_panel_dirty_indicator")?.classList.remove("hidden")
+}
+
+function hideDirtyIndicator() {
+  document.getElementById("control_panel_dirty_indicator")?.classList.add("hidden")
+}
+
+function syncDirtyIndicatorForSession(sessionId) {
+  const sid = String(sessionId || "live").toLowerCase()
+  if (controlPanelDirty[sid]) showDirtyIndicator()
+  else hideDirtyIndicator()
+}
+
+function beforeSessionSwitch(nextSession) {
+  const current = getActiveSessionId()
+  const next = String(nextSession || "").toLowerCase()
+  if (!next || next === current) return true
+  if (controlPanelDirty[current]) {
+    const confirmSwitch = confirm(
+      `Unsaved changes in ${current}.\nSwitch session anyway?`
+    )
+    if (!confirmSwitch) return false
+  }
+  return true
+}
+
 function collectSessionConfigPayload() {
   const tradeMode = document.getElementById("trade_mode_select")?.value
   const riskRaw = document.getElementById("risk_input")?.value
   const initialRaw = document.getElementById("initial_balance")?.value
   const strategy = document.getElementById("strategy_select")?.value
+  const symbolRaw = document.getElementById("symbol_select")?.value
+  const exchangeRaw = document.getElementById("exchange_select")?.value
   const rf = riskPercentInputToFraction(riskRaw)
-  return {
+  const sym =
+    symbolRaw != null && String(symbolRaw).trim()
+      ? String(symbolRaw).trim().toUpperCase()
+      : ""
+  const ex =
+    exchangeRaw != null && String(exchangeRaw).trim()
+      ? String(exchangeRaw).trim()
+      : ""
+  const out = {
     trade_mode: tradeMode,
     risk_percent: Number.isFinite(rf) ? rf : 0.01,
     initial_balance: Number(initialRaw),
     strategy,
   }
+  if (sym) out.symbol = sym
+  if (ex) out.exchange = ex
+  return out
 }
 
-async function syncSessionConfigFromControlPanel() {
-  const payload = collectSessionConfigPayload()
-  const sid = selectedDashboardSession || "live"
+async function postSessionConfigPayload(payload, sessionOverride) {
+  const sid = String(sessionOverride ?? selectedDashboardSession ?? "live")
   const res = await fetch(
     `/api/session/config?session=${encodeURIComponent(sid)}`,
     {
@@ -1103,6 +1167,121 @@ async function syncSessionConfigFromControlPanel() {
   }
 }
 
+async function syncSessionConfigFromControlPanel() {
+  await postSessionConfigPayload(collectSessionConfigPayload())
+}
+
+/** Poll until session is no longer RUNNING (after stop). */
+async function waitUntilSessionNotRunning(sessionId, maxMs = 25000) {
+  const sid = String(sessionId || "").toLowerCase()
+  const deadline = Date.now() + maxMs
+  while (Date.now() < deadline) {
+    let data = null
+    try {
+      data = await fetchJsonSafe("/api/system/sessions")
+    } catch (_e) {
+      await new Promise((r) => setTimeout(r, 400))
+      continue
+    }
+    const norm = normalizeSessionStatus(readStatusFromSessionsPayload(data, sid))
+    if (norm !== "RUNNING") return norm
+    await new Promise((r) => setTimeout(r, 400))
+  }
+  let finalNorm = "RUNNING"
+  try {
+    const data = await fetchJsonSafe("/api/system/sessions")
+    finalNorm = normalizeSessionStatus(readStatusFromSessionsPayload(data, sid))
+  } catch (_e) {}
+  if (finalNorm === "RUNNING") {
+    throw new Error("Timeout waiting for session to stop")
+  }
+  return finalNorm
+}
+
+/**
+ * Apply all control fields via backend clean-apply lifecycle.
+ * UI only posts /api/session/config; backend decides stop/restart.
+ */
+async function applyAllControlPanel() {
+  const btn = document.getElementById("apply_all_btn")
+  const sid = String(selectedDashboardSession || "live").toLowerCase()
+  const riskRaw = document.getElementById("risk_input")?.value
+  const fraction = riskPercentInputToFraction(riskRaw)
+  if (!Number.isFinite(fraction) || fraction <= 0) {
+    console.error("Invalid risk: enter a positive percent (e.g. 1 for 1%)")
+    return
+  }
+  const symPick = document.getElementById("symbol_select")?.value
+  if (!symPick || !String(symPick).trim()) {
+    console.error("Symbol required")
+    return
+  }
+
+  let sessionsData = null
+  try {
+    sessionsData = await fetchJsonSafe("/api/system/sessions")
+  } catch (_e) {
+    sessionsData = null
+  }
+  const rawStatus = readStatusFromSessionsPayload(sessionsData, sid)
+  const norm = normalizeSessionStatus(rawStatus)
+  const isRunning = norm === "RUNNING"
+
+  if (isRunning) {
+    const ok = window.confirm(
+      "Session đang chạy.\nApply sẽ Stop → Apply → Restart.\n\nBạn có muốn tiếp tục?"
+    )
+    if (!ok) return
+  }
+
+  const prevText = btn ? btn.textContent : ""
+  if (btn) {
+    btn.disabled = true
+    btn.textContent = "Applying..."
+  }
+
+  try {
+    if (isRunning) {
+      console.log(
+        "[APPLY ALL]",
+        `session = ${sid}`,
+        "state = running",
+        "action = backend_clean_restart"
+      )
+    } else {
+      console.log(
+        "[APPLY ALL]",
+        `session = ${sid}`,
+        `state = ${String(norm).toLowerCase()}`,
+        "action = apply_config"
+      )
+    }
+
+    const payload = collectSessionConfigPayload()
+    await postSessionConfigPayload(payload, sid)
+
+    controlPanelDirty[sid] = false
+    if (sid === getActiveSessionId()) hideDirtyIndicator()
+    v8MetricsApplyToken++
+    await loadSessionConfig(sid)
+    await refreshSessionStatuses()
+    await refreshAfterLifecycleAction()
+    if (isRunning && v8TradeScopedMode(sid)) {
+      sessionTradeStartSec[sid] = Math.floor(Date.now() / 1000)
+      lastTradeRowTimeSec = 0
+      v8TradeHistoryCleared = false
+    }
+  } catch (e) {
+    console.error("[APPLY ALL] failed:", e?.message || e)
+    alert(`Apply All failed: ${e?.message || e}`)
+  } finally {
+    if (btn) {
+      btn.disabled = false
+      btn.textContent = prevText || "Apply All"
+    }
+  }
+}
+
 /** After /api/control/* succeeds; session POST can fail if session row missing — do not block Apply UI. */
 async function syncSessionConfigAfterControl() {
   try {
@@ -1113,8 +1292,12 @@ async function syncSessionConfigAfterControl() {
 }
 
 /** Hydrate entire control panel from GET /api/session/config (per-session store only; never from /api/dashboard config). */
-async function loadSessionConfig() {
-  const sid = selectedDashboardSession || "live"
+async function loadSessionConfig(sessionOverride) {
+  const sid = String(sessionOverride ?? selectedDashboardSession ?? "live").toLowerCase()
+  if (controlPanelDirty[sid]) {
+    console.log(`[CONTROL PANEL] skip refresh session=${sid}`)
+    return
+  }
   try {
     const res = await fetch(`/api/session/config?session=${encodeURIComponent(sid)}`)
     const data = await res.json().catch(() => ({}))
@@ -1248,55 +1431,121 @@ async function refreshAfterLifecycleAction() {
 
 function normalizeSessionStatus(value) {
   const s = String(value || "").trim().toUpperCase()
-  if (s === "RUNNING") return "RUNNING"
-  if (s === "READY") return "READY"
+  if (s === "RUNNING" || s === "READY" || s === "FROZEN") return "RUNNING"
   if (s === "FINISHED") return "FINISHED"
   if (s === "ERROR") return "ERROR"
-  if (s === "STOPPED" || s === "IDLE" || s === "CREATED") return "STOPPED"
-  return "UNKNOWN"
+  if (s === "STOPPED" || s === "IDLE" || s === "CREATED" || s === "") return "STOPPED"
+  return "STOPPED"
 }
 
 function setSessionStatusEl(id, status) {
   const el = document.getElementById(id)
   if (!el) return
-  const text = normalizeSessionStatus(status)
-  el.textContent = text
   const key = id.replace(/^session_status_/, "")
+  const text = normalizeSessionStatus(status)
+  el.textContent = `● ${text}`
   if (key && Object.prototype.hasOwnProperty.call(sessionRuntimeStatus, key)) {
     sessionRuntimeStatus[key] = text
   }
-  el.classList.remove("running", "stopped", "unknown", "finished", "error")
-  if (text === "RUNNING") el.classList.add("running")
-  else if (text === "READY") el.classList.add("running")
-  else if (text === "STOPPED") el.classList.add("stopped")
-  else if (text === "FINISHED") el.classList.add("finished")
-  else if (text === "ERROR") el.classList.add("error")
-  else el.classList.add("unknown")
+  el.classList.remove(
+    "running",
+    "stopped",
+    "unknown",
+    "finished",
+    "error",
+    "session-running",
+    "session-stopped",
+    "session-finished",
+    "session-error",
+    "session-unknown"
+  )
+  if (text === "RUNNING" || text === "READY") {
+    el.classList.add("running", "session-running")
+  } else if (text === "STOPPED") {
+    el.classList.add("stopped", "session-stopped")
+  } else if (text === "FINISHED") {
+    el.classList.add("finished", "session-finished")
+  } else if (text === "ERROR") {
+    el.classList.add("error", "session-error")
+  } else {
+    el.classList.add("stopped", "session-stopped")
+  }
+  if (key) {
+    applySessionActionAvailability(key, text)
+  }
 }
 
-function readStatusFromSessionsPayload(payload, sessionId) {
-  if (!payload) return "UNKNOWN"
+function applySessionActionAvailability(sessionId, normalizedStatus) {
+  const row = document.querySelector(`.session-row[data-session="${sessionId}"]`)
+  if (!row) return
+  const startBtn = row.querySelector('button[data-action="start"]')
+  const stopBtn = row.querySelector('button[data-action="stop"]')
+  const restartBtn = row.querySelector('button[data-action="restart"]')
+  const importBtn = row.querySelector('button[data-action="import"]')
+  const exportBtn = row.querySelector('button[data-action="export"]')
+  const isRunning = normalizedStatus === "RUNNING" || normalizedStatus === "READY"
+  const isFinished = normalizedStatus === "FINISHED"
+
+  const show = (btn, visible) => {
+    if (!btn) return
+    btn.classList.toggle("is-hidden", !visible)
+  }
+
+  if (sessionId === "live") {
+    show(startBtn, !isRunning)
+    show(stopBtn, isRunning)
+    show(restartBtn, isRunning)
+    show(exportBtn, true)
+  } else if (sessionId === "shadow" || sessionId === "paper") {
+    show(startBtn, !isRunning)
+    show(stopBtn, isRunning)
+    show(restartBtn, isRunning)
+    show(exportBtn, true)
+  } else if (sessionId === "backtest") {
+    show(importBtn, !isRunning)
+    show(startBtn, !isRunning)
+    show(stopBtn, isRunning)
+    show(restartBtn, false)
+    show(exportBtn, !isRunning || isFinished)
+  }
+
+  if (startBtn) startBtn.disabled = isRunning
+  if (stopBtn) stopBtn.disabled = !isRunning
+}
+
+function deriveSessionStatusFromRow(row) {
+  if (row == null) return "STOPPED"
+  if (typeof row === "string") return normalizeSessionStatus(row)
+  if (typeof row !== "object") return "STOPPED"
+  if (row.running === true) return "RUNNING"
+  if (row.finished === true) return "FINISHED"
+  const raw = row.status
+  if (raw === undefined || raw === null || String(raw).trim() === "") return "STOPPED"
+  return normalizeSessionStatus(raw)
+}
+
+function findSessionRowInPayload(payload, sessionId) {
+  if (!payload) return null
   const sid = String(sessionId || "").toLowerCase()
   if (Array.isArray(payload)) {
     const row = payload.find((x) => String(x?.id || x?.session_id || "").toLowerCase() === sid)
-    return row?.status || "UNKNOWN"
+    return row && typeof row === "object" ? row : null
   }
   if (Array.isArray(payload.sessions)) {
     const row = payload.sessions.find((x) => String(x?.id || x?.session_id || "").toLowerCase() === sid)
-    return row?.status || "UNKNOWN"
+    return row && typeof row === "object" ? row : null
   }
   if (payload.sessions && typeof payload.sessions === "object") {
     const sess = payload.sessions
     const row = sess[sid]
-    if (row && typeof row === "object") return row.status || "UNKNOWN"
-    if (typeof row === "string") return row
+    if (row && typeof row === "object") return row
     if (sid === "shadow") {
       const ls = sess.live_shadow
-      if (ls && typeof ls === "object") return ls.status || "UNKNOWN"
+      if (ls && typeof ls === "object") return ls
       for (const k of Object.keys(sess)) {
         const ent = sess[k]
         if (ent && typeof ent === "object" && String(ent.mode || "").toLowerCase() === "shadow") {
-          return ent.status || "UNKNOWN"
+          return ent
         }
       }
     }
@@ -1304,15 +1553,56 @@ function readStatusFromSessionsPayload(payload, sessionId) {
       for (const k of Object.keys(sess)) {
         const ent = sess[k]
         if (ent && typeof ent === "object" && String(ent.mode || "").toLowerCase() === "paper") {
-          return ent.status || "UNKNOWN"
+          return ent
         }
       }
     }
   }
-  if (payload[sid] && typeof payload[sid] === "object") {
-    return payload[sid].status || "UNKNOWN"
+  if (payload[sid] && typeof payload[sid] === "object") return payload[sid]
+  return null
+}
+
+function rowIndicatesSessionRunning(row) {
+  if (row == null || typeof row !== "object") return false
+  if (row.running === true) return true
+  if (row.running === false) return false
+  return deriveSessionStatusFromRow(row) === "RUNNING"
+}
+
+function readStatusFromSessionsPayload(payload, sessionId) {
+  if (!payload) return "STOPPED"
+  const sid = String(sessionId || "").toLowerCase()
+  if (payload.sessions && typeof payload.sessions === "object" && !Array.isArray(payload.sessions)) {
+    const raw = payload.sessions[sid]
+    if (typeof raw === "string") return normalizeSessionStatus(raw)
   }
-  return "UNKNOWN"
+  return deriveSessionStatusFromRow(findSessionRowInPayload(payload, sessionId))
+}
+
+function applySessionsRuntimeFromPayload(data) {
+  const ids = ["live", "shadow", "paper", "backtest"]
+  if (!data) {
+    for (const id of ids) {
+      sessionsRuntime[id].running = false
+    }
+    return
+  }
+  for (const id of ids) {
+    sessionsRuntime[id].running = rowIndicatesSessionRunning(findSessionRowInPayload(data, id))
+  }
+}
+
+function syncSessionRunningState() {
+  const sessions = sessionsRuntime
+  const anyRunning =
+    sessions.live?.running ||
+    sessions.shadow?.running ||
+    sessions.paper?.running
+  if (!anyRunning) {
+    setTradingToggleUI(true)
+    return
+  }
+  setTradingToggleUI(lastControlTradingEnabled === false)
 }
 
 async function refreshSessionStatuses() {
@@ -1320,17 +1610,20 @@ async function refreshSessionStatuses() {
     const res = await fetch("/api/system/sessions")
     if (!res.ok) throw new Error(`HTTP ${res.status}`)
     const data = await res.json()
+    applySessionsRuntimeFromPayload(data)
     setSessionStatusEl("session_status_live", readStatusFromSessionsPayload(data, "live"))
     setSessionStatusEl("session_status_shadow", readStatusFromSessionsPayload(data, "shadow"))
     setSessionStatusEl("session_status_paper", readStatusFromSessionsPayload(data, "paper"))
     setSessionStatusEl("session_status_backtest", readStatusFromSessionsPayload(data, "backtest"))
   } catch (_e) {
-    setSessionStatusEl("session_status_live", "UNKNOWN")
-    setSessionStatusEl("session_status_shadow", "UNKNOWN")
-    setSessionStatusEl("session_status_paper", "UNKNOWN")
-    setSessionStatusEl("session_status_backtest", "UNKNOWN")
+    applySessionsRuntimeFromPayload(null)
+    setSessionStatusEl("session_status_live", "STOPPED")
+    setSessionStatusEl("session_status_shadow", "STOPPED")
+    setSessionStatusEl("session_status_paper", "STOPPED")
+    setSessionStatusEl("session_status_backtest", "STOPPED")
   }
   updateHeaderRunning()
+  syncSessionRunningState()
 }
 
 function getSessionQueryParams() {
@@ -1688,8 +1981,16 @@ function resetBacktestPanels() {
 async function onSessionSelectionChanged() {
   const select = document.getElementById("session_select")
   const dual = document.getElementById("dual_panel_toggle")
-  selectedDashboardSession = select ? String(select.value || "live").toLowerCase() : "live"
+  const currentSession = getActiveSessionId()
+  const nextSession = select ? String(select.value || "live").toLowerCase() : currentSession
+  if (!beforeSessionSwitch(nextSession)) {
+    if (select) select.value = currentSession
+    if (dual) dual.checked = dualPanelModeEnabled
+    return
+  }
+  selectedDashboardSession = nextSession
   dualPanelModeEnabled = dual ? dual.checked === true : false
+  syncDirtyIndicatorForSession(selectedDashboardSession)
   if (String(selectedDashboardSession || "").toLowerCase() !== "backtest") {
     v8BacktestState = "idle"
     backtestCsvLoaded = false
@@ -1846,18 +2147,48 @@ document.addEventListener("DOMContentLoaded", function(){
     })
   }
 
-  document.getElementById("apply_initial_balance")?.addEventListener("click", async () => {
-    const el = document.getElementById("initial_balance")
-    const btn = document.getElementById("apply_initial_balance")
-    const value = el?.value
-    try {
-      await syncSessionConfigFromControlPanel()
-      markControlApplyCommitted("initial_balance", String(Number(value)))
-      if (btn) flashButton(btn)
-    } catch (e) {
-      console.warn("[control panel] initial balance apply failed:", e?.message || e)
-    }
+  document.getElementById("apply_all_btn")?.addEventListener("click", () => {
+    void applyAllControlPanel()
   })
+
+  const draftInputIds = [
+    "strategy_select",
+    "trade_mode_select",
+    "symbol_select",
+    "exchange_select",
+    "risk_input",
+    "initial_balance",
+  ]
+  const draftElements = document.querySelectorAll(".v8-control-input")
+  if (draftElements.length > 0) {
+    draftElements.forEach((el) => {
+      const markDirty = () => {
+        const sid = getActiveSessionId()
+        controlPanelDirty[sid] = true
+        showDirtyIndicator()
+        console.log(`[CONTROL PANEL] draft enabled session=${sid}`)
+      }
+      el.addEventListener("change", markDirty)
+      if (el.tagName === "INPUT") {
+        el.addEventListener("input", markDirty)
+      }
+    })
+  } else {
+    for (const id of draftInputIds) {
+      const el = document.getElementById(id)
+      if (!el) continue
+      const markDirty = () => {
+        const sid = getActiveSessionId()
+        controlPanelDirty[sid] = true
+        showDirtyIndicator()
+        console.log(`[CONTROL PANEL] draft enabled session=${sid}`)
+      }
+      el.addEventListener("change", markDirty)
+      if (el.tagName === "INPUT") {
+        el.addEventListener("input", markDirty)
+      }
+    }
+  }
 
   document.addEventListener("visibilitychange", () => {
     if (document.hidden) return
@@ -1869,6 +2200,7 @@ document.addEventListener("DOMContentLoaded", function(){
   })
   initV8DownloadPanel()
   syncDlSymbolFromLiveSelect()
+  syncDirtyIndicatorForSession(getActiveSessionId())
 })
 
 function v8PaintDashboardPayload(data) {
@@ -1908,24 +2240,10 @@ function v8PaintDashboardPayload(data) {
   updateMetrics(data)
   updatePerformance(data)
 
-  if (data.config) {
-    const paused = data.config.trading_enabled === false
-    const pauseBtn = document.getElementById("pause_btn")
-    const resumeBtn = document.getElementById("resume_btn")
-    if (pauseBtn && resumeBtn) {
-      if (paused) {
-        pauseBtn.style.background = "#ef4444"
-        pauseBtn.style.color = "#fff"
-        resumeBtn.style.background = ""
-        resumeBtn.style.color = ""
-      } else {
-        resumeBtn.style.background = "#22c55e"
-        resumeBtn.style.color = "#000"
-        pauseBtn.style.background = ""
-        pauseBtn.style.color = ""
-      }
-    }
+  if (data.config && typeof data.config.trading_enabled === "boolean") {
+    lastControlTradingEnabled = data.config.trading_enabled
   }
+  syncSessionRunningState()
 
   updateSlippage(data)
   updateLatency(data)
@@ -2135,12 +2453,8 @@ await fetch("/api/control/pause",{
 method:"POST"
 })
 
-// đổi màu
-document.getElementById("pause_btn").style.background = "#ef4444"
-document.getElementById("pause_btn").style.color = "#fff"
-
-document.getElementById("resume_btn").style.background = ""
-document.getElementById("resume_btn").style.color = ""
+lastControlTradingEnabled = false
+setTradingToggleUI(true)
 
 }catch(e){
 
@@ -2158,12 +2472,8 @@ await fetch("/api/control/resume",{
 method:"POST"
 })
 
-// đổi màu
-document.getElementById("resume_btn").style.background = "#22c55e"
-document.getElementById("resume_btn").style.color = "#000"
-
-document.getElementById("pause_btn").style.background = ""
-document.getElementById("pause_btn").style.color = ""
+lastControlTradingEnabled = true
+setTradingToggleUI(false)
 
 }catch(e){
 
@@ -2171,6 +2481,43 @@ console.error(e)
 
 }
 
+}
+
+function setTradingToggleUI(paused) {
+  const toggleBtn = document.getElementById("trading_toggle_btn")
+  const badge = document.getElementById("trading_status_badge")
+  if (toggleBtn) {
+    if (paused) {
+      toggleBtn.textContent = "Resume Trading"
+      toggleBtn.classList.remove("v8-btn-warn")
+      toggleBtn.classList.add("v8-btn-go")
+    } else {
+      toggleBtn.textContent = "Pause Trading"
+      toggleBtn.classList.remove("v8-btn-go")
+      toggleBtn.classList.add("v8-btn-warn")
+    }
+  }
+  if (badge) {
+    if (paused) {
+      badge.textContent = "● PAUSED"
+      badge.classList.remove("status-running")
+      badge.classList.add("status-paused")
+    } else {
+      badge.textContent = "● RUNNING"
+      badge.classList.remove("status-paused")
+      badge.classList.add("status-running")
+    }
+  }
+}
+
+function toggleTradingState() {
+  const badge = document.getElementById("trading_status_badge")
+  const isPaused = badge?.classList.contains("status-paused") === true
+  if (isPaused) {
+    void resumeBot()
+  } else {
+    void pauseBot()
+  }
 }
 
 function resetLayout(){
@@ -3409,7 +3756,7 @@ function v8BuildTradeRowTr(t) {
     feeRaw !== null && feeRaw !== undefined && feeRaw !== "" && Number.isFinite(Number(feeRaw))
       ? v8FormatNumber2(feeRaw)
       : "—"
-  const strat = v8Dash(t.strategy)
+  const strat = v8StrategyLabel(t.strategy)
   const sess = v8Dash(t.mode)
 
   const su = String(t.side || "").toUpperCase()
@@ -3682,95 +4029,89 @@ return String(v)
 }
 
 function updateRisk(data) {
-  if (v8PanelHiddenById("v8-panel-risk")) return
-  if (v8SkipIfBacktestHardReset("updateRisk")) return
+  try {
+    if (v8PanelHiddenById("v8-panel-risk")) return
+    if (v8SkipIfBacktestHardReset("updateRisk")) return
 
-const rs = data?.risk_status
-const pnl = data?.pnl
+    const riskEl = document.getElementById("risk")
+    if (!riskEl) return
 
-if (!rs && !pnl && !v8SessionMetricsActive()) return
+    const rs = data?.risk_status
+    const pnl = data?.pnl
+    if (!rs && !pnl && !v8SessionMetricsActive()) return
 
-let html = ""
+    const badge = (kind, text) => `<span class="risk-badge ${kind}">● ${text}</span>`
+    const stateBadge = (raw) => {
+      const s = String(raw || "").toLowerCase()
+      if (s.includes("block") || s.includes("deny")) return badge("risk-danger", "BLOCKED")
+      if (s.includes("warn") || s.includes("cooldown")) return badge("risk-warning", "WARNING")
+      return badge("risk-ok", "OK")
+    }
+    const row = (k, v, mono = false) =>
+      `<div class="risk-row"><span class="risk-key risk-label">${k}</span><span class="risk-val risk-value${mono ? " mono" : ""}">${v}</span></div>`
 
-if(rs){
-const allowed = rs.trade_allowed === true
-const blocked = Array.isArray(rs.blocked_rules) && rs.blocked_rules.length
-? rs.blocked_rules.join(", ")
-: "—"
+    let html = ""
 
-html += `<b>Trade allowed:</b> ${allowed ? "yes" : "no"}<br>`
-html += `<b>Blocked rules:</b> ${blocked}<br>`
+    if(rs){
+      const allowed = rs.trade_allowed === true
+      html += row("Allowed", allowed ? badge("risk-ok", "YES") : badge("risk-danger", "NO"))
+      html += row("State", stateBadge(rs.readonly_state || (allowed ? "ok" : "blocked")))
 
-if(rs.readonly_state){
-html += `<b>Control state:</b> ${riskFmt(rs.readonly_state)}<br>`
-}
+      const der = rs.daily_equity_risk
+      if(der && typeof der === "object" && Object.keys(der).length){
+        const ddPct =
+          der.daily_drawdown_pct === null || der.daily_drawdown_pct === undefined
+            ? "—"
+            : Number(der.daily_drawdown_pct).toFixed(2) + "%"
+        const limPct =
+          der.daily_limit_pct === null || der.daily_limit_pct === undefined
+            ? "—"
+            : Number(der.daily_limit_pct).toFixed(2) + "%"
+        html += row("Daily EQ", formatCurrency(der.current_equity), true)
+        html += row("Drawdown", ddPct, true)
+        html += row("Limit", limPct, true)
+      }
 
-const der = rs.daily_equity_risk
-if(der && typeof der === "object" && Object.keys(der).length){
-html += `<br><b>Daily start equity:</b> ${formatCurrency(der.daily_start_equity)}<br>`
-html += `<b>Current equity:</b> ${formatCurrency(der.current_equity)}<br>`
-html += `<b>Daily drawdown:</b> ${
-der.daily_drawdown_pct === null || der.daily_drawdown_pct === undefined
-? "—"
-: der.daily_drawdown_pct + "%"
-}<br>`
-html += `<b>Daily limit:</b> ${riskFmt(der.daily_limit_pct)}%<br><br>`
-}
+      const rules = rs.rules || {}
+      const streakRule = rules.consecutive_loss || {}
+      const cooldownRule = rules.cooldown || {}
+      const maxDdRule = rules.max_drawdown || {}
+      const streak = `${riskFmt(streakRule.loss_streak ?? 0)} / ${riskFmt(streakRule.limit ?? 2)}`
+      html += row("Loss Streak", `${streak} ${stateBadge(streakRule.status || "ok")}`)
+      if (cooldownRule.cooldown_active) {
+        html += row(
+          "Cooldown",
+          `${badge("risk-warning", "ACTIVE")} ${riskFmt(cooldownRule.remaining_time ?? 0)}s`,
+          true
+        )
+      } else {
+        html += row("Cooldown", "INACTIVE")
+      }
+      html += row("Max DD", stateBadge(maxDdRule.status || (maxDdRule.active ? "warning" : "ok")))
+    }
 
-const ord = [
-"consecutive_loss",
-"daily_loss_limit",
-"cooldown",
-"max_drawdown"
-]
+    const showJournal = Boolean(pnl) || v8SessionMetricsActive()
+    if (showJournal) {
+      const drawdownStr = v8SessionMetricsActive()
+        ? (Number(sessionPnlLocked.max_drawdown ?? 0) * 100).toFixed(2) + "%"
+        : (Number(pnl?.max_drawdown ?? 0) * 100).toFixed(2) + "%"
+      const realizedStr = v8SessionMetricsActive()
+        ? formatCurrency(sessionPnlLocked.realized_pnl ?? 0)
+        : formatCurrency(pnl?.realized_pnl ?? 0)
+      html += row("Journal DD", `<span id="risk-journal-drawdown" class="mono">${drawdownStr}</span>`)
+      html += row("Realized", `<span id="risk-realized-pnl" class="mono">${realizedStr}</span>`)
+    }
 
-const rules = rs.rules || {}
-for(const key of ord){
-const rule = rules[key]
-if(!rule) continue
-const st = riskFmt(rule.status)
-let detail = ""
-if(key === "consecutive_loss"){
-detail = `streak ${riskFmt(rule.loss_streak)} / limit ${riskFmt(rule.limit)}`
-}else if(key === "daily_loss_limit"){
-detail = `daily ${riskFmt(rule.daily_loss)} / max ${riskFmt(rule.max_daily_loss)}`
-}else if(key === "cooldown"){
-const rem = rule.remaining_time
-detail = rule.cooldown_active
-? `remaining ${riskFmt(rem)}s`
-: "—"
-}else if(key === "max_drawdown"){
-if(rule.active){
-detail = `start ${formatCurrency(rule.daily_start_equity)} / curr ${formatCurrency(rule.current_equity)} / dd ${riskFmt(rule.daily_drawdown_pct)}% / limit ${riskFmt(rule.max_drawdown)}%`
-}else{
-detail = "inactive until first trade (UTC day)"
-}
-}
-html += `<br><b>${key}</b> (${st})<br>${detail}<br>`
-}
-html += "<br>"
-}
+    riskEl.classList.add("v8-risk-panel")
+    riskEl.innerHTML = html
 
-const showJournal = Boolean(pnl) || v8SessionMetricsActive()
-if (showJournal) {
-  const drawdownStr = v8SessionMetricsActive()
-    ? (Number(sessionPnlLocked.max_drawdown ?? 0) * 100).toFixed(2) + "%"
-    : (Number(pnl?.max_drawdown ?? 0) * 100).toFixed(2) + "%"
-  const realizedStr = v8SessionMetricsActive()
-    ? formatCurrency(sessionPnlLocked.realized_pnl ?? 0)
-    : formatCurrency(pnl?.realized_pnl ?? 0)
-  html += `<b>Journal drawdown:</b> <span id="risk-journal-drawdown" class="mono">${drawdownStr}</span><br>`
-  html += `<b>Realized PnL:</b> <span id="risk-realized-pnl" class="mono">${realizedStr}</span><br>`
-}
-
-const riskEl = document.getElementById("risk")
-if (!riskEl) return
-riskEl.innerHTML = html
-
-if (v8SessionMetricsActive()) {
-  resetV8SessionRiskPlaceholder()
-  return
-}
+    if (v8SessionMetricsActive()) {
+      resetV8SessionRiskPlaceholder()
+      return
+    }
+  } catch (err) {
+    console.error("updateRisk error:", err)
+  }
 }
 
 function updateSystemMonitor(data){
@@ -4149,7 +4490,7 @@ function renderExecutionPipeline() {
 function updateExecutionPipeline(data) {
   if (v8PanelHiddenById("v8-panel-pipeline")) return
   const root = data || {}
-  const selectedStatus = sessionRuntimeStatus[selectedDashboardSession] || "UNKNOWN"
+  const selectedStatus = sessionRuntimeStatus[selectedDashboardSession] || "STOPPED"
   const pipelineSessionActive =
     selectedStatus === "RUNNING" || selectedStatus === "READY"
   const steps = ["signal", "decision", "order", "exchange", "fill"]

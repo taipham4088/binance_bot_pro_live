@@ -10,7 +10,7 @@
 </head>
 <body class="v8-body">
 
-<header class="v8-header">
+<header class="v8-header header-bar">
   <div class="v8-header-top">
     <h1 class="v8-title">BOT PRO LIVE</h1>
     <div class="v8-header-actions">
@@ -26,11 +26,11 @@
           <input id="dual_panel_toggle" type="checkbox" onchange="onSessionSelectionChanged()">
           LIVE | SHADOW
         </label>
-        <button type="button" class="v8-btn v8-btn-ghost" onclick="openSessionControl()">Sessions</button>
+        <button type="button" class="v8-btn header-btn header-btn-primary" onclick="openSessionControl()">Sessions</button>
       </div>
       <div class="v8-header-util">
         <div class="v8-dropdown" id="v8_panels_dropdown">
-          <button type="button" class="v8-btn v8-btn-ghost" id="v8_panels_btn" aria-expanded="false" aria-haspopup="true">Panels ▾</button>
+          <button type="button" class="v8-btn header-btn header-btn-secondary" id="v8_panels_btn" aria-expanded="false" aria-haspopup="true">Panels ▾</button>
           <div class="v8-panels-menu" id="v8_panels_menu" role="menu" hidden>
             <div class="v8-panels-menu-title">Show panel</div>
             <label class="v8-panel-toggle-row"><input type="checkbox" data-v8-panel-id="v8-panel-metrics" checked> Metrics</label>
@@ -40,7 +40,7 @@
             <label class="v8-panel-toggle-row"><input type="checkbox" data-v8-panel-id="v8-exec-history-ui" checked> Execution History</label>
           </div>
         </div>
-        <button type="button" class="v8-btn v8-btn-ghost" id="v8_reset_layout_btn" onclick="resetV8DashboardLayout()">Reset Layout</button>
+        <button type="button" class="v8-btn header-btn header-btn-warning" id="v8_reset_layout_btn" onclick="resetV8DashboardLayout()">Reset Layout</button>
       </div>
     </div>
   </div>
@@ -49,16 +49,13 @@
     <span class="v8-sep">|</span>
     <span id="mh-exchange">BINANCE</span>
     <span class="v8-sep">|</span>
-    <span>MODE:</span>
-    <span id="mh-mode" class="mh-mode">SHADOW</span>
-    <span class="v8-sep">|</span>
     <span id="mh-price" class="mono mh-price">Price: —</span>
     <span class="v8-sep">|</span>
     <span id="mh-change" class="mono">24h: —</span>
     <span class="v8-sep">|</span>
     <span id="mh-funding" class="mono">Funding: —</span>
     <span class="v8-sep">|</span>
-    <span id="mh-running" class="mh-running unknown">UNKNOWN</span>
+    <span id="mh-running" class="mh-running stopped">STOPPED</span>
     <span class="v8-sep">|</span>
     <span id="mh-cpu" class="mono muted">CPU: —</span>
     <span class="v8-sep">|</span>
@@ -125,18 +122,20 @@
         <div class="v8-card-head">
           <h2>CONTROL PANEL</h2>
           <div class="control-actions">
-            <button type="button" id="pause_btn" class="v8-btn v8-btn-warn" onclick="pauseBot()">Pause</button>
-            <button type="button" id="resume_btn" class="v8-btn v8-btn-go" onclick="resumeBot()">Resume</button>
+            <span id="trading_status_badge" class="trading-status status-running">● RUNNING</span>
+            <button type="button" id="trading_toggle_btn" class="v8-btn v8-btn-warn" onclick="toggleTradingState()">Pause Trading</button>
           </div>
         </div>
         <div class="control-panel v8-control-panel">
+          <div class="control-row v8-apply-all-row">
+            <button type="button" id="apply_all_btn" class="v8-btn v8-btn-apply-all">Apply All</button>
+          </div>
           <div class="control-filter">
             <input id="symbol_filter" type="text" placeholder="Filter symbol…" onkeyup="filterSymbols()">
           </div>
           <div class="control-row">
             <label>Symbol</label>
             <select id="symbol_select" onchange="pendingButton('symbol_select')"></select>
-            <button type="button" class="v8-btn v8-btn-blue" onclick="setSymbol(this)">Apply</button>
           </div>
           <div class="control-row">
             <label>Exchange</label>
@@ -146,7 +145,6 @@
               <option value="okx">OKX</option>
               <option value="paper">PAPER</option>
             </select>
-            <button type="button" class="v8-btn v8-btn-blue" onclick="setExchange(this)">Apply</button>
           </div>
           <div class="control-row v8-risk-stepper">
             <label>Risk (%)</label>
@@ -155,12 +153,10 @@
               <input id="risk_input" type="number" value="1" step="0.01" min="0" oninput="pendingButton('risk_input')">
               <button type="button" class="v8-btn v8-btn-ghost" onclick="adjustRisk(0.1)">+</button>
             </div>
-            <button type="button" class="v8-btn v8-btn-blue" onclick="setRisk(this)">Apply</button>
           </div>
-          <div class="control-row">
+          <div class="control-row" data-v8-modes="shadow,paper,backtest">
             <label>Initial Balance</label>
             <input id="initial_balance" type="number" value="10000" step="1" oninput="pendingButton('initial_balance')">
-            <button type="button" id="apply_initial_balance" class="v8-btn v8-btn-blue">Apply</button>
           </div>
           <div class="control-row">
             <label>Trade Mode</label>
@@ -169,18 +165,20 @@
               <option value="long">LONG</option>
               <option value="short">SHORT</option>
             </select>
-            <button type="button" class="v8-btn v8-btn-blue" onclick="setMode(this)">Apply</button>
           </div>
           <div class="control-row">
             <label>Strategy</label>
             <select id="strategy_select" onchange="pendingButton('strategy_select')">
-              <option value="range_trend">RANGE TREND</option>
+              <option value="range_trend_1m">Range Trend 1m</option>
+              <option value="range_trend">Range Trend 5m</option>
+              <option value="range_trend_15m">Range Trend 15m</option>
+              <option value="range_trend_1h">Range Trend 1h</option>
             </select>
-            <button type="button" class="v8-btn v8-btn-blue" onclick="setStrategy(this)">Apply</button>
           </div>
           <div class="v8-kill-row">
             <button type="button" class="v8-btn v8-btn-kill" onclick="pauseBot()">Kill switch (pause trading)</button>
           </div>
+          <div id="control_panel_dirty_indicator" class="v8-dirty-indicator hidden">● Unsaved Changes</div>
         </div>
       </article>
     </div>
@@ -402,41 +400,54 @@
       <h3>SESSION CONTROL</h3>
       <button type="button" class="session-close-btn" onclick="closeSessionControl()">Close</button>
     </div>
-    <div class="session-live-status">
-      <div>LIVE: <span id="session_status_live">UNKNOWN</span></div>
-      <div>SHADOW: <span id="session_status_shadow">UNKNOWN</span></div>
-      <div>PAPER: <span id="session_status_paper">UNKNOWN</span></div>
-      <div>BACKTEST: <span id="session_status_backtest">UNKNOWN</span></div>
-    </div>
     <div class="session-control">
-      <div class="session-row">
-        <span>LIVE</span>
-        <button type="button" data-session="live" data-action="start">Start</button>
-        <button type="button" data-session="live" data-action="stop">Stop</button>
-        <button type="button" data-session="live" data-action="restart">Restart</button>
-        <button type="button" data-session="live" data-action="export">Export</button>
+      <div class="session-row" data-session="live">
+        <div class="session-left">
+          <span class="session-name">LIVE</span>
+          <span id="session_status_live" class="session-status session-stopped">● STOPPED</span>
+        </div>
+        <div class="session-actions">
+          <button type="button" class="v8-btn-start" data-session="live" data-action="start">Start</button>
+          <button type="button" class="v8-btn-stop" data-session="live" data-action="stop">Stop</button>
+          <button type="button" class="v8-btn-restart" data-session="live" data-action="restart">Restart</button>
+          <button type="button" data-session="live" data-action="export">Export</button>
+        </div>
       </div>
-      <div class="session-row">
-        <span>SHADOW</span>
-        <button type="button" data-session="shadow" data-action="start">Start</button>
-        <button type="button" data-session="shadow" data-action="stop">Stop</button>
-        <button type="button" data-session="shadow" data-action="restart">Restart</button>
-        <button type="button" data-session="shadow" data-action="export">Export</button>
+      <div class="session-row" data-session="shadow">
+        <div class="session-left">
+          <span class="session-name">SHADOW</span>
+          <span id="session_status_shadow" class="session-status session-stopped">● STOPPED</span>
+        </div>
+        <div class="session-actions">
+          <button type="button" class="v8-btn-start" data-session="shadow" data-action="start">Start</button>
+          <button type="button" class="v8-btn-stop" data-session="shadow" data-action="stop">Stop</button>
+          <button type="button" class="v8-btn-restart" data-session="shadow" data-action="restart">Restart</button>
+          <button type="button" data-session="shadow" data-action="export">Export</button>
+        </div>
       </div>
-      <div class="session-row">
-        <span>PAPER</span>
-        <button type="button" class="v8-btn-start" data-session="paper" data-action="start">Start</button>
-        <button type="button" class="v8-btn-stop" data-session="paper" data-action="stop">Stop</button>
-        <button type="button" class="v8-btn-restart" data-session="paper" data-action="restart">Restart</button>
-        <button type="button" data-session="paper" data-action="export">Export</button>
+      <div class="session-row" data-session="paper">
+        <div class="session-left">
+          <span class="session-name">PAPER</span>
+          <span id="session_status_paper" class="session-status session-stopped">● STOPPED</span>
+        </div>
+        <div class="session-actions">
+          <button type="button" class="v8-btn-start" data-session="paper" data-action="start">Start</button>
+          <button type="button" class="v8-btn-stop" data-session="paper" data-action="stop">Stop</button>
+          <button type="button" class="v8-btn-restart" data-session="paper" data-action="restart">Restart</button>
+          <button type="button" data-session="paper" data-action="export">Export</button>
+        </div>
       </div>
-      <div class="session-row">
-        <span>BACKTEST</span>
-        <button type="button" class="v8-btn-start" data-session="backtest" data-action="start">Start</button>
-        <button type="button" class="v8-btn-stop" data-session="backtest" data-action="stop">Stop</button>
-        <button type="button" class="v8-btn-restart" data-session="backtest" data-action="restart">Restart</button>
-        <button type="button" data-session="backtest" data-action="import">Import</button>
-        <button type="button" data-session="backtest" data-action="export">Export</button>
+      <div class="session-row" data-session="backtest">
+        <div class="session-left">
+          <span class="session-name">BACKTEST</span>
+          <span id="session_status_backtest" class="session-status session-stopped">● STOPPED</span>
+        </div>
+        <div class="session-actions">
+          <button type="button" class="v8-btn-start" data-session="backtest" data-action="start">Start</button>
+          <button type="button" class="v8-btn-stop" data-session="backtest" data-action="stop">Stop</button>
+          <button type="button" data-session="backtest" data-action="import">Import</button>
+          <button type="button" data-session="backtest" data-action="export">Export</button>
+        </div>
       </div>
     </div>
     <div id="session_control_status" class="session-control-status"></div>

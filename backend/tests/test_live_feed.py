@@ -4,7 +4,7 @@ import time
 def on_candle(i, row, df):
     print(i, row["time"], row["close"])
 
-market = BinanceMarketAdapter("BTCUSDT", "1m")
+market = BinanceMarketAdapter("BTCUSDT", "1m", "15m")
 market.subscribe_candle(on_candle)
 
 while True:
