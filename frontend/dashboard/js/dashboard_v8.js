@@ -47,6 +47,7 @@ const sessionsRuntime = {
   paper: { running: false },
   backtest: { running: false },
 }
+let isSelectedSessionRunning = true
 
 /** Last known server `config.trading_enabled` for pause/resume when a session is running. */
 let lastControlTradingEnabled = true
@@ -61,6 +62,8 @@ let executionHistory = []
 let lastTrades = []
 let lastExecution = []
 let lastBacktestSummary = null
+let currentExecutionId = null
+let riskLayoutInitialized = false
 
 /** Last rendered PnL snapshot (cleared on backtest reset). */
 let lastPnl = null
@@ -82,10 +85,12 @@ const V8_USER_PANEL_IDS = [
 const V8_HISTORY_MAX_ROWS = 50
 const V8_TRADE_HISTORY_COLS = 9
 const V8_EXEC_HISTORY_COLS = 12
-const V8_POLL_DASH_MS = 2000
-const V8_POLL_TRADES_MS = 5000
-const V8_POLL_EXEC_MS = 5000
-const V8_POLL_METRICS_MS = 3000
+const V8_POLL_SESSIONS_MS = 5000
+const V8_POLL_DASH_MS = 10000
+const V8_POLL_TRADES_MS = 15000
+const V8_POLL_EXEC_MS = 15000
+const V8_POLL_METRICS_MS = 10000
+const V8_POLL_MARKET_MS = 15000
 
 /** Set true temporarily to trace load → paint → metrics (verbose when metrics poll runs). */
 const V8_DEBUG_DASHBOARD_PAINT = false
@@ -1497,18 +1502,21 @@ function normalizeSessionStatus(value) {
   return "STOPPED"
 }
 
-function setSessionStatusEl(id, status) {
+function setSessionStatusEl(id, running) {
   const el = document.getElementById(id)
   if (!el) return
   const key = id.replace(/^session_status_/, "")
-  const text = normalizeSessionStatus(status)
+  const isRunning = running === true
+  const text = isRunning ? "RUNNING" : "STOPPED"
   el.textContent = `● ${text}`
   if (key && Object.prototype.hasOwnProperty.call(sessionRuntimeStatus, key)) {
     sessionRuntimeStatus[key] = text
   }
+  // FULL RESET before apply fresh state
   el.classList.remove(
     "running",
     "stopped",
+    "paused",
     "unknown",
     "finished",
     "error",
@@ -1518,14 +1526,8 @@ function setSessionStatusEl(id, status) {
     "session-error",
     "session-unknown"
   )
-  if (text === "RUNNING" || text === "READY") {
+  if (isRunning) {
     el.classList.add("running", "session-running")
-  } else if (text === "STOPPED") {
-    el.classList.add("stopped", "session-stopped")
-  } else if (text === "FINISHED") {
-    el.classList.add("finished", "session-finished")
-  } else if (text === "ERROR") {
-    el.classList.add("error", "session-error")
   } else {
     el.classList.add("stopped", "session-stopped")
   }
@@ -1577,6 +1579,7 @@ function deriveSessionStatusFromRow(row) {
   if (typeof row === "string") return normalizeSessionStatus(row)
   if (typeof row !== "object") return "STOPPED"
   if (row.running === true) return "RUNNING"
+  if (row.running === false) return "STOPPED"
   if (row.finished === true) return "FINISHED"
   const raw = row.status
   if (raw === undefined || raw === null || String(raw).trim() === "") return "STOPPED"
@@ -1652,16 +1655,70 @@ function applySessionsRuntimeFromPayload(data) {
 }
 
 function syncSessionRunningState() {
-  const sessions = sessionsRuntime
-  const anyRunning =
-    sessions.live?.running ||
-    sessions.shadow?.running ||
-    sessions.paper?.running
-  if (!anyRunning) {
+  const sid = String(selectedDashboardSession || "live").toLowerCase()
+  const selectedRunning = sessionsRuntime[sid]?.running === true
+  isSelectedSessionRunning = selectedRunning
+  if (!selectedRunning) {
+    resetStoppedPanels()
     setTradingToggleUI(true)
     return
   }
   setTradingToggleUI(lastControlTradingEnabled === false)
+}
+
+function resetStoppedPanels() {
+  // Reset PnL panel
+  if (!v8PanelHiddenById("v8-panel-pnl")) {
+    const pnlEl = document.getElementById("pnl")
+    if (pnlEl) {
+      pnlEl.innerHTML = `
+      <div class="v8-kv"><span class="k">Equity</span><span class="v mono">—</span></div>
+      <div class="v8-kv"><span class="k">Realized PnL</span><span class="v mono">—</span></div>
+      <div class="v8-kv"><span class="k">Drawdown</span><span class="v mono">—</span></div>
+      <div class="v8-kv"><span class="k">Profit Factor</span><span class="v mono">—</span></div>
+      `
+    }
+  }
+
+  // Reset Risk panel
+  if (!v8PanelHiddenById("v8-panel-risk")) {
+    renderRiskPanel({
+      allowed: "—",
+      state: "STOPPED",
+      dailyEq: "—",
+      drawdown: "—",
+      limit: "—",
+      lossStreak: "—",
+      cooldown: "—",
+      maxDd: "—",
+      journalDd: "—",
+      realized: "—",
+    })
+  }
+
+  // Reset Execution panel
+  if (!v8PanelHiddenById("v8-panel-execution")) {
+    const execEl = document.getElementById("execution")
+    if (execEl) {
+      execEl.innerHTML = `
+      <div class="v8-kv"><span class="k">State</span><span class="v state-idle">IDLE</span></div>
+      <div class="v8-kv"><span class="k">Last Order</span><span class="v mono">—</span></div>
+      <div class="v8-kv"><span class="k">Execution Latency</span><span class="v mono">—</span></div>
+      `
+    }
+  }
+
+  // Optional position reset
+  if (!v8PanelHiddenById("v8-panel-position")) {
+    const posEl = document.getElementById("position")
+    if (posEl) {
+      posEl.innerHTML = `
+      <div class="v8-kv"><span class="k">Side</span><span class="v">FLAT</span></div>
+      <div class="v8-kv"><span class="k">Size</span><span class="v mono">0</span></div>
+      <div class="v8-kv"><span class="k">Entry Price</span><span class="v mono">—</span></div>
+      `
+    }
+  }
 }
 
 async function refreshSessionStatuses() {
@@ -1669,30 +1726,32 @@ async function refreshSessionStatuses() {
     const res = await fetch("/api/system/sessions")
     if (!res.ok) throw new Error(`HTTP ${res.status}`)
     const data = await res.json()
-    applySessionsRuntimeFromPayload(data)
-    setSessionStatusEl("session_status_live", readStatusFromSessionsPayload(data, "live"))
-    setSessionStatusEl("session_status_shadow", readStatusFromSessionsPayload(data, "shadow"))
-    setSessionStatusEl("session_status_paper", readStatusFromSessionsPayload(data, "paper"))
-    setSessionStatusEl("session_status_backtest", readStatusFromSessionsPayload(data, "backtest"))
+    const sessions = data?.sessions || {}
+    const liveRunning = !!sessions.live?.running
+    const shadowRunning = !!sessions.shadow?.running
+    const paperRunning = !!sessions.paper?.running
+    const backtestRunning = !!sessions.backtest?.running
+    sessionsRuntime.live.running = liveRunning
+    sessionsRuntime.shadow.running = shadowRunning
+    sessionsRuntime.paper.running = paperRunning
+    sessionsRuntime.backtest.running = backtestRunning
+    setSessionStatusEl("session_status_live", liveRunning)
+    setSessionStatusEl("session_status_shadow", shadowRunning)
+    setSessionStatusEl("session_status_paper", paperRunning)
+    setSessionStatusEl("session_status_backtest", backtestRunning)
   } catch (_e) {
-    applySessionsRuntimeFromPayload(null)
-    setSessionStatusEl("session_status_live", "STOPPED")
-    setSessionStatusEl("session_status_shadow", "STOPPED")
-    setSessionStatusEl("session_status_paper", "STOPPED")
-    setSessionStatusEl("session_status_backtest", "STOPPED")
+    sessionsRuntime.live.running = false
+    sessionsRuntime.shadow.running = false
+    sessionsRuntime.paper.running = false
+    sessionsRuntime.backtest.running = false
+    setSessionStatusEl("session_status_live", false)
+    setSessionStatusEl("session_status_shadow", false)
+    setSessionStatusEl("session_status_paper", false)
+    setSessionStatusEl("session_status_backtest", false)
   }
   updateHeaderRunning()
   syncSessionRunningState()
   applyV8StoppedSessionRealtimePolicy()
-  // [V8 DEBUG] Investigation: session status source = GET /api/system/sessions → sessionRuntimeStatus
-  const _dbgSel = String(selectedDashboardSession || "live").toLowerCase()
-  const _dbgSession = { status: sessionRuntimeStatus[_dbgSel] || "STOPPED" }
-  console.log("SESSION STATUS", _dbgSession.status, {
-    endpoint: "GET /api/system/sessions",
-    selectedDashboardSession: _dbgSel,
-    sessionRuntimeStatus: { ...sessionRuntimeStatus },
-    rawRowLive: "(see Network tab)",
-  })
 }
 
 function getSessionQueryParams() {
@@ -2062,6 +2121,12 @@ async function onSessionSelectionChanged() {
     return
   }
   selectedDashboardSession = nextSession
+  // Force guard refresh immediately from last known session runtime cache.
+  const selectedRunning = sessionsRuntime[selectedDashboardSession]?.running === true
+  isSelectedSessionRunning = selectedRunning
+  if (!selectedRunning) {
+    resetStoppedPanels()
+  }
   dualPanelModeEnabled = dual ? dual.checked === true : false
   syncDirtyIndicatorForSession(selectedDashboardSession)
   if (String(selectedDashboardSession || "").toLowerCase() !== "backtest") {
@@ -2084,6 +2149,9 @@ async function onSessionSelectionChanged() {
     delete dashboardSessionCache["backtest"]
   }
   try {
+    // Force immediate status/UI sync on session switch (do not wait polling interval).
+    await refreshSessionStatuses()
+    syncSessionRunningState()
     await loadSessionConfig()
     applyDashboardModeVisibility(selectedDashboardSession)
     // Full repaint lifecycle (same idea as bootstrap): always refetch dashboard + metrics for the new session.
@@ -2172,6 +2240,7 @@ document.addEventListener("DOMContentLoaded", function(){
     useSessionMetrics = true
   }
   v8BootstrapAllTradeAnchors()
+  ensureRiskLayout()
 
   applyDashboardModeVisibility(getV8DashboardSessionMode())
   initV8PanelsDropdown()
@@ -2183,6 +2252,7 @@ document.addEventListener("DOMContentLoaded", function(){
     // Hydration can change selectedDashboardSession; mode visibility was applied earlier with defaults.
     applyDashboardModeVisibility(selectedDashboardSession)
     await loadSymbols()
+    await refreshSessionStatuses()
     v8BypassPnlRiskFreezeOnce = true
     await loadDashboard()
     await new Promise(r => requestAnimationFrame(r))
@@ -2197,6 +2267,7 @@ document.addEventListener("DOMContentLoaded", function(){
     if (v8ExecHistoryPollActive()) await updateExecutionHistory()
   })()
 
+  setInterval(refreshSessionStatuses, V8_POLL_SESSIONS_MS)
   setInterval(loadDashboard, V8_POLL_DASH_MS)
   setInterval(() => {
     if (v8TradesHistoryPollActive()) updateTrades()
@@ -2211,7 +2282,7 @@ document.addEventListener("DOMContentLoaded", function(){
   renderExecutionPipeline()
   initMarketWS()
   loadMarket()
-  setInterval(loadMarket,5000)
+  setInterval(loadMarket, V8_POLL_MARKET_MS)
 
   const modal = document.getElementById("sessionControlModal")
   if (modal) {
@@ -2371,7 +2442,6 @@ async function loadDashboard(){
 
 try{
 const requestId = ++dashboardRequestId
-await refreshSessionStatuses()
 updateHeaderRunning()
 
 const res = await fetch(`/api/dashboard?${getSessionQueryParams()}`)
@@ -2837,6 +2907,7 @@ function updateClearButtonState(data) {
 }
 
 function updatePosition(data) {
+  if (!isSelectedSessionRunning) return
   updateClearButtonState(data)
   if (v8PanelHiddenById("v8-panel-position")) return
   const p = data?.position
@@ -3624,39 +3695,55 @@ function updateAccountBalanceOnly(data) {
 }
 
 function updatePnL(data) {
+  if (!isSelectedSessionRunning) return
   const sel = String(selectedDashboardSession || "").toLowerCase()
-  const payHint = v8PayloadSessionHint(data)
-  if (payHint && sel === "backtest" && payHint !== "backtest") return
-  if (payHint && sel !== "backtest" && payHint === "backtest") return
+  const payHintRaw =
+    data?.session ??
+    data?.mode ??
+    data?.session_id ??
+    data?.sessionId ??
+    v8PayloadSessionHint(data)
+  const payHint = payHintRaw != null ? String(payHintRaw).toLowerCase() : ""
+  // Hard guard: never render cross-session payload.
+  if (payHint && payHint !== sel) {
+    return
+  }
+  const root = dashboardSessionCache?.[sel] || data
+  if (!root) {
+    return
+  }
+  const rootHint = v8PayloadSessionHint(root)
+  if (rootHint && sel === "backtest" && rootHint !== "backtest") return
+  if (rootHint && sel !== "backtest" && rootHint === "backtest") return
   if (
     selectedDashboardSession === "backtest" &&
     backtestIdleMode &&
-    !v8IsNewBacktestRun(data) &&
-    !v8BacktestPayloadHasSummarySignals(data)
+    !v8IsNewBacktestRun(root) &&
+    !v8BacktestPayloadHasSummarySignals(root)
   ) {
     return
   }
   if (
     String(selectedDashboardSession || "").toLowerCase() === "backtest" &&
     backtestResetActive &&
-    !v8IsBacktestFinished(data) &&
-    v8GetBacktestTrades(data).length === 0 &&
-    !v8BacktestPayloadHasSummarySignals(data)
+    !v8IsBacktestFinished(root) &&
+    v8GetBacktestTrades(root).length === 0 &&
+    !v8BacktestPayloadHasSummarySignals(root)
   ) {
     return
   }
   if (v8SkipIfBacktestHardReset("updatePnL")) return
   if (v8SessionMetricsActive()) {
-    updateAccountBalanceOnly(data)
+    updateAccountBalanceOnly(root)
     return
   }
-  const pnl = data?.pnl
+  const pnl = root?.pnl
   if (
     String(selectedDashboardSession || "").toLowerCase() === "backtest" &&
     backtestResetActive &&
     pnl &&
     pnl.realized_pnl !== 0 &&
-    !v8IsBacktestFinished(data)
+    !v8IsBacktestFinished(root)
   ) {
     return
   }
@@ -3672,13 +3759,13 @@ function updatePnL(data) {
   const btTrades = isBacktestSession
     ? Array.isArray(recentTrades) && recentTrades.length > 0
       ? recentTrades
-      : v8GetBacktestTrades(data)
+      : v8GetBacktestTrades(root)
     : []
   const sbBacktest = isBacktestSession
     ? Number(
         pnl.start_balance ??
           document.getElementById("initial_balance")?.value ??
-          data?.config?.initial_balance
+          root?.config?.initial_balance
       )
     : NaN
   const btCurvePack =
@@ -4031,6 +4118,7 @@ function updateSystem(data) {
 }
 
 function updateExecution(data) {
+  if (!isSelectedSessionRunning) return
   if (v8PanelHiddenById("v8-panel-execution")) return
   const exec = data?.observability?.execution_monitor
   const pos = data?.position
@@ -4038,6 +4126,21 @@ function updateExecution(data) {
   const last = rt.length ? rt[0] : null
   const el = document.getElementById("execution")
   if (!el) return
+
+  const incomingExecutionId =
+    exec?.execution_id ||
+    exec?.order_id ||
+    (exec?.event_time_ms != null ? `event:${exec.event_time_ms}` : null) ||
+    (exec?.timestamp != null ? `ts:${exec.timestamp}` : null) ||
+    null
+  if (incomingExecutionId && currentExecutionId && incomingExecutionId !== currentExecutionId) {
+    el.innerHTML = `
+    <div class="v8-kv"><span class="k">State</span><span class="v state-idle">IDLE</span></div>
+    <div class="v8-kv"><span class="k">Last Order</span><span class="v mono">—</span></div>
+    <div class="v8-kv"><span class="k">Execution Latency</span><span class="v mono">—</span></div>
+`
+  }
+  currentExecutionId = incomingExecutionId || currentExecutionId
 
   let state = "IDLE"
   let lastOrder = "—"
@@ -4054,10 +4157,34 @@ function updateExecution(data) {
     const side = (last.side || "").toUpperCase()
     const px = last.exit ?? last.entry ?? last.fill_price ?? "—"
     lastOrder = `${side} @ ${px}`
+  } else if (exec) {
+    const fallback =
+      exec.last_order ||
+      exec.lastOrder ||
+      exec.last_fill ||
+      exec.lastFill ||
+      exec.last_execution ||
+      exec.lastExecution
+    if (fallback && typeof fallback === "object") {
+      const symbol = fallback.symbol || exec.symbol || "—"
+      const side = String(fallback.side || exec.side || "—").toUpperCase()
+      const sizeRaw = fallback.size ?? exec.size
+      const size = Number.isFinite(Number(sizeRaw)) ? String(sizeRaw) : "—"
+      const priceRaw = fallback.price ?? exec.fill_price ?? exec.order_price
+      const price = Number.isFinite(Number(priceRaw)) ? String(priceRaw) : "—"
+      const timeRaw =
+        fallback.time ??
+        exec.timestamp ??
+        (fallback.event_time_ms != null ? Number(fallback.event_time_ms) / 1000 : null) ??
+        (exec.event_time_ms != null ? Number(exec.event_time_ms) / 1000 : null)
+      const timeText = formatTradeTime(timeRaw)
+      lastOrder = `${symbol} ${side} ${size} @ ${price} | ${timeText}`
+    }
   }
 
   const idle = !exec && (!pos || !pos.side || pos.side === "flat") && !last
   if (idle) {
+    currentExecutionId = null
     el.innerHTML = `
     <div class="v8-kv"><span class="k">State</span><span class="v state-idle">IDLE</span></div>
     <div class="v8-kv"><span class="k">Last Order</span><span class="v mono">—</span></div>
@@ -4111,82 +4238,147 @@ if(typeof v === "number" && Number.isFinite(v)) return String(v)
 return String(v)
 }
 
+function setText(selector, value) {
+  const el = document.querySelector(selector)
+  if (!el) {
+    console.warn("[RISK] Missing element:", selector)
+    return
+  }
+  el.textContent = value == null || value === "" ? "—" : String(value)
+}
+
+function ensureRiskLayout() {
+  if (riskLayoutInitialized) return
+  const riskRoot =
+    document.querySelector("#risk") ||
+    document.querySelector("#risk-panel") ||
+    document.querySelector(".panel-risk")
+  if (!riskRoot) return
+
+  if (!riskRoot.querySelector("#risk-allowed")) {
+    riskRoot.innerHTML = `
+      <div class="v8-kv"><span class="k">ALLOWED</span><span id="risk-allowed" class="v">—</span></div>
+      <div class="v8-kv"><span class="k">STATE</span><span id="risk-state" class="v">STOPPED</span></div>
+      <div class="v8-kv"><span class="k">DAILY EQ</span><span id="risk-daily-eq" class="v mono">—</span></div>
+      <div class="v8-kv"><span class="k">DRAWDOWN</span><span id="risk-drawdown" class="v mono">—</span></div>
+      <div class="v8-kv"><span class="k">LIMIT</span><span id="risk-limit" class="v mono">—</span></div>
+      <div class="v8-kv"><span class="k">LOSS STREAK</span><span id="risk-loss-streak" class="v mono">—</span></div>
+      <div class="v8-kv"><span class="k">COOLDOWN</span><span id="risk-cooldown" class="v mono">—</span></div>
+      <div class="v8-kv"><span class="k">MAX DD</span><span id="risk-max-dd" class="v mono">—</span></div>
+      <div class="v8-kv"><span class="k">JOURNAL DD</span><span id="risk-journal-drawdown" class="v mono">—</span></div>
+      <div class="v8-kv"><span class="k">REALIZED</span><span id="risk-realized-pnl" class="v mono">—</span></div>
+    `
+  }
+  riskLayoutInitialized = true
+
+  const ids = [
+    "#risk-allowed",
+    "#risk-state",
+    "#risk-daily-eq",
+    "#risk-drawdown",
+    "#risk-limit",
+    "#risk-loss-streak",
+    "#risk-cooldown",
+    "#risk-max-dd",
+    "#risk-journal-drawdown",
+    "#risk-realized-pnl",
+  ]
+
+  ids.forEach((id) => {
+    const el = document.querySelector(id)
+    if (!el) {
+      console.warn("[RISK] Missing element:", id)
+    }
+  })
+}
+
+function renderRiskPanel(data) {
+  ensureRiskLayout()
+  const allowedEl = document.querySelector("#risk-allowed")
+  if (allowedEl) {
+    const allowedRaw = String(data?.allowed ?? "—").toUpperCase()
+    allowedEl.classList.remove("ok", "good", "muted")
+    if (allowedRaw === "YES") {
+      allowedEl.classList.add("good")
+      allowedEl.innerHTML = `<span class="dot green"></span> YES`
+    } else if (allowedRaw === "—") {
+      allowedEl.classList.add("muted")
+      allowedEl.textContent = "—"
+    } else {
+      allowedEl.textContent = allowedRaw
+    }
+  }
+
+  const stateEl = document.querySelector("#risk-state")
+  if (stateEl) {
+    const stateRaw = String(data?.state ?? "STOPPED").toUpperCase()
+    stateEl.classList.remove("ok", "good", "muted")
+    if (stateRaw === "OK") {
+      stateEl.classList.add("ok")
+      stateEl.innerHTML = `<span class="dot green"></span> OK`
+    } else if (stateRaw === "STOPPED") {
+      stateEl.classList.add("muted")
+      stateEl.textContent = "STOPPED"
+    } else {
+      stateEl.textContent = stateRaw
+    }
+  }
+  setText("#risk-daily-eq", data?.dailyEq ?? "—")
+  setText("#risk-drawdown", data?.drawdown ?? "—")
+  setText("#risk-limit", data?.limit ?? "—")
+  setText("#risk-loss-streak", data?.lossStreak ?? "—")
+  setText("#risk-cooldown", data?.cooldown ?? "—")
+  setText("#risk-max-dd", data?.maxDd ?? "—")
+  setText("#risk-journal-drawdown", data?.journalDd ?? "—")
+  setText("#risk-realized-pnl", data?.realized ?? "—")
+}
+
 function updateRisk(data) {
   try {
+    const sel = String(selectedDashboardSession || "").toLowerCase()
+    const payHintRaw = data?.session || data?.mode || data?.session_id
+    const payHint = payHintRaw != null ? String(payHintRaw).toLowerCase() : ""
+    if (payHint && payHint !== sel) {
+      return
+    }
+    if (!isSelectedSessionRunning) return
     if (v8PanelHiddenById("v8-panel-risk")) return
     if (v8SkipIfBacktestHardReset("updateRisk")) return
-
-    const riskEl = document.getElementById("risk")
-    if (!riskEl) return
 
     const rs = data?.risk_status
     const pnl = data?.pnl
     if (!rs && !pnl && !v8SessionMetricsActive()) return
-
-    const badge = (kind, text) => `<span class="risk-badge ${kind}">● ${text}</span>`
-    const stateBadge = (raw) => {
-      const s = String(raw || "").toLowerCase()
-      if (s.includes("block") || s.includes("deny")) return badge("risk-danger", "BLOCKED")
-      if (s.includes("warn") || s.includes("cooldown")) return badge("risk-warning", "WARNING")
-      return badge("risk-ok", "OK")
-    }
-    const row = (k, v, mono = false) =>
-      `<div class="risk-row"><span class="risk-key risk-label">${k}</span><span class="risk-val risk-value${mono ? " mono" : ""}">${v}</span></div>`
-
-    let html = ""
-
-    if(rs){
-      const allowed = rs.trade_allowed === true
-      html += row("Allowed", allowed ? badge("risk-ok", "YES") : badge("risk-danger", "NO"))
-      html += row("State", stateBadge(rs.readonly_state || (allowed ? "ok" : "blocked")))
-
-      const der = rs.daily_equity_risk
-      if(der && typeof der === "object" && Object.keys(der).length){
-        const ddPct =
-          der.daily_drawdown_pct === null || der.daily_drawdown_pct === undefined
-            ? "—"
-            : Number(der.daily_drawdown_pct).toFixed(2) + "%"
-        const limPct =
-          der.daily_limit_pct === null || der.daily_limit_pct === undefined
-            ? "—"
-            : Number(der.daily_limit_pct).toFixed(2) + "%"
-        html += row("Daily EQ", formatCurrency(der.current_equity), true)
-        html += row("Drawdown", ddPct, true)
-        html += row("Limit", limPct, true)
-      }
-
-      const rules = rs.rules || {}
-      const streakRule = rules.consecutive_loss || {}
-      const cooldownRule = rules.cooldown || {}
-      const maxDdRule = rules.max_drawdown || {}
-      const streak = `${riskFmt(streakRule.loss_streak ?? 0)} / ${riskFmt(streakRule.limit ?? 2)}`
-      html += row("Loss Streak", `${streak} ${stateBadge(streakRule.status || "ok")}`)
-      if (cooldownRule.cooldown_active) {
-        html += row(
-          "Cooldown",
-          `${badge("risk-warning", "ACTIVE")} ${riskFmt(cooldownRule.remaining_time ?? 0)}s`,
-          true
-        )
-      } else {
-        html += row("Cooldown", "INACTIVE")
-      }
-      html += row("Max DD", stateBadge(maxDdRule.status || (maxDdRule.active ? "warning" : "ok")))
-    }
-
-    const showJournal = Boolean(pnl) || v8SessionMetricsActive()
-    if (showJournal) {
-      const drawdownStr = v8SessionMetricsActive()
-        ? (Number(sessionPnlLocked.max_drawdown ?? 0) * 100).toFixed(2) + "%"
-        : (Number(pnl?.max_drawdown ?? 0) * 100).toFixed(2) + "%"
-      const realizedStr = v8SessionMetricsActive()
-        ? formatCurrency(sessionPnlLocked.realized_pnl ?? 0)
-        : formatCurrency(pnl?.realized_pnl ?? 0)
-      html += row("Journal DD", `<span id="risk-journal-drawdown" class="mono">${drawdownStr}</span>`)
-      html += row("Realized", `<span id="risk-realized-pnl" class="mono">${realizedStr}</span>`)
-    }
-
-    riskEl.classList.add("v8-risk-panel")
-    riskEl.innerHTML = html
+    const der = rs?.daily_equity_risk
+    const drawdownStr = v8SessionMetricsActive()
+      ? (Number(sessionPnlLocked.max_drawdown ?? 0) * 100).toFixed(2) + "%"
+      : (Number(pnl?.max_drawdown ?? 0) * 100).toFixed(2) + "%"
+    const limitPct =
+      der?.daily_limit_pct === null || der?.daily_limit_pct === undefined
+        ? "—"
+        : Number(der.daily_limit_pct).toFixed(2) + "%"
+    const streakRule = rs?.rules?.consecutive_loss || {}
+    const cooldownRule = rs?.rules?.cooldown || {}
+    const maxDdRule = rs?.rules?.max_drawdown || {}
+    const lossStreak = `${riskFmt(streakRule.loss_streak ?? 0)} / ${riskFmt(streakRule.limit ?? 2)}`
+    const cooldown = cooldownRule.cooldown_active
+      ? `ACTIVE ${riskFmt(cooldownRule.remaining_time ?? 0)}s`
+      : "INACTIVE"
+    const maxDd = String(maxDdRule.status || (maxDdRule.active ? "WARNING" : "OK")).toUpperCase()
+    const realizedStr = v8SessionMetricsActive()
+      ? formatCurrency(sessionPnlLocked.realized_pnl ?? 0)
+      : formatCurrency(pnl?.realized_pnl ?? 0)
+    renderRiskPanel({
+      allowed: rs ? (rs.trade_allowed === true ? "YES" : "NO") : "—",
+      state: rs ? String(rs.readonly_state || (rs.trade_allowed ? "OK" : "BLOCKED")).toUpperCase() : "STOPPED",
+      dailyEq: der ? formatCurrency(der.current_equity) : "—",
+      drawdown: drawdownStr,
+      limit: limitPct,
+      lossStreak,
+      cooldown,
+      maxDd,
+      journalDd: drawdownStr,
+      realized: realizedStr,
+    })
 
     if (v8SessionMetricsActive()) {
       resetV8SessionRiskPlaceholder()
@@ -4662,15 +4854,15 @@ function v8ExecStatusField(t) {
   return v8Dash(t?.status)
 }
 
-/** Clears execution history table DOM (client state; pair with POST /api/execution/clear to wipe DB). */
+/** Clears execution history table DOM after backend cutoff clear. */
 function clearV8ExecutionHistoryView() {
   const tbody = document.querySelector("#execution_history_v8 tbody")
   if (!tbody) return
   lastExecRowTimeSec = -1
-  tbody.innerHTML = `<tr><td colspan="${V8_EXEC_HISTORY_COLS}" class="v8-table-placeholder">Cleared — view only; data reloads on next refresh</td></tr>`
+  tbody.innerHTML = `<tr><td colspan="${V8_EXEC_HISTORY_COLS}" class="v8-table-placeholder">Execution history cleared</td></tr>`
 }
 
-/** Clears session-scoped execution_history SQLite + UI; polling will stay empty until new fills. */
+/** Marks execution clear cutoff on backend + resets UI view. */
 async function clearExecutionHistory() {
   const sid = String(selectedDashboardSession || "live").toLowerCase()
   if (!["live", "shadow", "paper", "backtest"].includes(sid)) {
@@ -4680,7 +4872,7 @@ async function clearExecutionHistory() {
     return
   }
   try {
-    const res = await fetch(`/api/execution/clear?session=${encodeURIComponent(sid)}`, {
+    const res = await fetch(`/dashboard/clear_execution?session=${encodeURIComponent(sid)}`, {
       method: "POST",
     })
     if (!res.ok) {
@@ -4705,7 +4897,7 @@ async function clearExecutionHistory() {
   }
 }
 
-/** Clears trade history: archive + backend reset for selected session, then UI + refresh. */
+/** Marks trade clear cutoff on backend, then resets UI + refresh. */
 async function clearV8TradeHistoryView() {
   const tbody = document.querySelector("#trade_history_v8 tbody")
   if (!tbody) return
@@ -4723,17 +4915,11 @@ async function clearV8TradeHistoryView() {
 
   const sid = String(selectedDashboardSession || "live").toLowerCase()
   try {
-    const ar = await fetch(`/api/session/archive?session=${encodeURIComponent(sid)}`, {
-      method: "POST",
-    })
-    if (!ar.ok && typeof console !== "undefined" && console.warn) {
-      console.warn("[V8] session archive failed", ar.status)
-    }
-    const rs = await fetch(`/api/session/reset?session=${encodeURIComponent(sid)}`, {
+    const rs = await fetch(`/dashboard/clear_trades?session=${encodeURIComponent(sid)}`, {
       method: "POST",
     })
     if (!rs.ok && typeof console !== "undefined" && console.warn) {
-      console.warn("[V8] session reset failed", rs.status)
+      console.warn("[V8] trade clear failed", rs.status)
     }
   } catch (e) {
     if (typeof console !== "undefined" && console.warn) {
@@ -4831,7 +5017,7 @@ async function updateExecutionHistory() {
   try {
     const requestId = ++executionHistoryRequestId
 
-    const res = await fetch(`/api/execution/history?${getExecutionHistoryQueryParams()}`)
+    const res = await fetch(`/api/dashboard/execution/history?${getExecutionHistoryQueryParams()}`)
 
     if (!res.ok) {
       executionHistory = []

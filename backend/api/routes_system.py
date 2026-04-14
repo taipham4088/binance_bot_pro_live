@@ -253,11 +253,51 @@ async def stop_session(request: Request, session_id: str):
 @router.get("/sessions")
 def list_sessions(request: Request):
     manager = request.app.state.manager
-    sessions_map = {}
+    sessions_map = {
+        "live": {"mode": "live", "status": "STOPPED", "running": False},
+        "shadow": {"mode": "shadow", "status": "STOPPED", "running": False},
+        "paper": {"mode": "paper", "status": "STOPPED", "running": False},
+        "backtest": {"mode": "backtest", "status": "STOPPED", "running": False},
+    }
+    def _runner_running(sess):
+        r = getattr(sess, "runner", None)
+        if not r:
+            return False
+        if hasattr(r, "is_running"):
+            try:
+                return bool(r.is_running())
+            except Exception:
+                return False
+        if hasattr(r, "is_alive"):
+            try:
+                return bool(r.is_alive())
+            except Exception:
+                return False
+        return False
+
     for session_id, session in manager.sessions.items():
-        sessions_map[session_id] = {
+        sid = str(session_id or "").strip().lower()
+        if sid not in sessions_map:
+            continue
+        raw_status = str(getattr(session, "status", "UNKNOWN") or "UNKNOWN").upper()
+        runner_alive = _runner_running(session)
+        market = getattr(session, "market", None)
+        ws_running = bool(
+            market and getattr(getattr(market, "client", None), "running", False)
+        )
+        market_running = bool(market and getattr(market, "running", False))
+        live_system_running = bool(getattr(getattr(session, "live_system", None), "running", False))
+        engine_running = bool(getattr(getattr(session, "engine", None), "running", False))
+        running = bool(
+            runner_alive or ws_running or market_running or live_system_running or engine_running
+        )
+        status = raw_status
+        if not running and raw_status in {"RUNNING", "READY", "FROZEN", "STOPPING"}:
+            status = "STOPPED"
+        sessions_map[sid] = {
             "mode": session.mode,
-            "status": getattr(session, "status", "UNKNOWN"),
+            "status": status,
+            "running": running,
         }
     return {
         "active_session": manager.active_session_id,

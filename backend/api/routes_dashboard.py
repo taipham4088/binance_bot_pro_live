@@ -4,9 +4,11 @@ from backend.observability.execution_monitor_instance import execution_monitor
 
 import psutil
 import os
+import time
 process = psutil.Process(os.getpid())
 
 router = APIRouter()
+_SESSION_KEYS = frozenset({"live", "shadow", "paper", "backtest"})
 
 
 @router.get("/api/dashboard")
@@ -177,6 +179,8 @@ async def get_trade_history(
         return {"status": "ok", "history": []}
 
     history = []
+    cache = request.app.state.dashboard_cache
+    trade_clear_time = cache.get_trade_clear_time(key)
 
     db_path = mode_storage.get_trade_path(key)
     if db_path and os.path.exists(db_path):
@@ -205,6 +209,13 @@ async def get_trade_history(
         conn.close()
 
         for r in rows:
+            row_time = r[0]
+            try:
+                row_time_int = int(row_time) if row_time is not None else None
+            except (TypeError, ValueError):
+                row_time_int = None
+            if trade_clear_time is not None and row_time_int is not None and row_time_int <= trade_clear_time:
+                continue
             history.append(
                 {
                     "time": r[0],
@@ -231,10 +242,139 @@ async def get_trade_history(
         except Exception:
             pass
 
+    if trade_clear_time is not None:
+        filtered = []
+        for h in history:
+            row_time = h.get("time")
+            try:
+                row_time_int = int(row_time) if row_time is not None else None
+            except (TypeError, ValueError):
+                row_time_int = None
+            if row_time_int is not None and row_time_int <= trade_clear_time:
+                continue
+            filtered.append(h)
+        history = filtered
+
     return {
         "status": "ok",
         "history": history
     }
+
+
+@router.get("/api/dashboard/execution/history")
+async def get_dashboard_execution_history(
+    request: Request,
+    session: str | None = None,
+    mode: str | None = None,
+):
+    import sqlite3
+    from backend.storage.mode_storage import mode_storage
+
+    key = (session or mode or "").strip().lower()
+    if not key or key not in _SESSION_KEYS:
+        return {"status": "ok", "history": []}
+
+    cache = request.app.state.dashboard_cache
+    execution_clear_time = cache.get_execution_clear_time(key)
+
+    db_path = mode_storage.get_execution_path(key)
+    if not db_path or not os.path.exists(db_path):
+        return {"status": "ok", "history": []}
+
+    try:
+        conn = sqlite3.connect(db_path)
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT
+                time,
+                mode,
+                symbol,
+                strategy,
+                side,
+                size,
+                signal_price,
+                order_price,
+                fill_price,
+                fee,
+                slippage,
+                latency,
+                status,
+                step,
+                order_id
+            FROM execution_history
+            ORDER BY id DESC
+            LIMIT 100
+            """
+        )
+        rows = cursor.fetchall()
+        conn.close()
+    except Exception:
+        return {"status": "ok", "history": []}
+
+    history = []
+    for r in rows:
+        row_time_ms = r[0]
+        ts_sec = int(row_time_ms / 1000) if row_time_ms is not None else None
+        if execution_clear_time is not None and ts_sec is not None and ts_sec <= execution_clear_time:
+            continue
+        lat = r[11]
+        history.append(
+            {
+                "time": ts_sec,
+                "timestamp": ts_sec,
+                "mode": r[1],
+                "symbol": r[2],
+                "strategy": r[3],
+                "side": r[4],
+                "size": r[5],
+                "signal_price": r[6],
+                "order_price": r[7],
+                "fill_price": r[8],
+                "fee": r[9],
+                "slippage": r[10],
+                "latency": round(lat, 2) if lat is not None else 0,
+                "status": r[12],
+                "step": r[13],
+                "order_id": r[14],
+            }
+        )
+    return {"status": "ok", "history": history}
+
+
+@router.post("/dashboard/clear_execution")
+async def dashboard_clear_execution(request: Request):
+    import sqlite3
+    from backend.storage.mode_storage import mode_storage
+
+    session_id = (request.query_params.get("session") or "").strip().lower()
+    if not session_id or session_id not in _SESSION_KEYS:
+        return {"status": "ok", "session": session_id, "cleared": False}
+
+    db_path = mode_storage.get_execution_path(session_id)
+    if not db_path or not os.path.exists(db_path):
+        return {"status": "ok", "session": session_id, "cleared": True}
+
+    try:
+        conn = sqlite3.connect(db_path)
+        try:
+            cur = conn.cursor()
+            cur.execute("DELETE FROM execution_history")
+            conn.commit()
+        finally:
+            conn.close()
+    except Exception:
+        return {"status": "ok", "session": session_id, "cleared": False}
+
+    return {"status": "ok", "session": session_id, "cleared": True}
+
+
+@router.post("/dashboard/clear_trades")
+async def dashboard_clear_trades(request: Request):
+    cache = request.app.state.dashboard_cache
+    session_id = (request.query_params.get("session") or "live").strip().lower()
+    ts = cache.mark_trade_clear(session_id, int(time.time()))
+    return {"status": "ok", "session": session_id, "trade_clear_time": ts}
 
 @router.post("/api/control/exchange")
 async def set_exchange(data: dict, request: Request):

@@ -38,6 +38,9 @@ class DashboardCache:
         self.app_state = None
         self._float_entry_by_session: dict[str, float] = {}
         self._metrics_engine_by_session: dict[str, MetricsEngine] = {}
+        # Non-destructive clear cutoffs (unix seconds) for dashboard history filtering.
+        self.execution_clear_time: dict[str, int] = {}
+        self.trade_clear_time: dict[str, int] = {}
 
     # -------------------------
     # Session helpers
@@ -430,6 +433,26 @@ class DashboardCache:
         sid = self._normalize_session_id(session_id)
         self._metrics_engine_by_session.pop(sid, None)
 
+    def mark_execution_clear(self, session_id: str | None, ts_sec: int | None = None) -> int:
+        sid = self._normalize_session_id(session_id)
+        ts = int(ts_sec if ts_sec is not None else time.time())
+        self.execution_clear_time[sid] = ts
+        return ts
+
+    def mark_trade_clear(self, session_id: str | None, ts_sec: int | None = None) -> int:
+        sid = self._normalize_session_id(session_id)
+        ts = int(ts_sec if ts_sec is not None else time.time())
+        self.trade_clear_time[sid] = ts
+        return ts
+
+    def get_execution_clear_time(self, session_id: str | None) -> int | None:
+        sid = self._normalize_session_id(session_id)
+        return self.execution_clear_time.get(sid)
+
+    def get_trade_clear_time(self, session_id: str | None) -> int | None:
+        sid = self._normalize_session_id(session_id)
+        return self.trade_clear_time.get(sid)
+
     def _metrics_summary_for_session_db(self, session_id: str) -> dict:
         sid = self._normalize_session_id(session_id)
         path = mode_storage.get_session_trade_path(sid)
@@ -584,14 +607,6 @@ class DashboardCache:
 
         manager = getattr(self.app_state, "manager", None) if self.app_state else None
         primary = self._pick_primary_session(manager) if manager else None
-        print(
-            "[DEBUG] dashboard refresh",
-            {
-                "primary_id": getattr(primary, "id", None) if primary else None,
-                "primary_status": getattr(primary, "status", None) if primary else None,
-                "n_sessions": len(manager.sessions) if manager and getattr(manager, "sessions", None) else 0,
-            },
-        )
 
         position = (
             self._get_position_for_session(primary)
@@ -740,11 +755,6 @@ class DashboardCache:
                 pnl["exchange_wallet_quote"] = None
                 pnl["exchange_wallet_usdt"] = None
                 pnl["account_equity"] = None
-
-        # DEBUG
-        print("POSITION:", position)
-        print("PRICE:", price)
-        print("FLOATING:", floating_primary)
 
         metrics = self.metrics_engine.summary()
 

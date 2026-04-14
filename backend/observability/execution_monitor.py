@@ -132,6 +132,8 @@ class ExecutionMonitor:
         self.last_trace: Optional[ExecutionTrace] = None
         self.history = deque(maxlen=20)
         self._last_high_latency_alert_ts: float = 0.0
+        self._execution_seq: int = 0
+        self._execution_id: Optional[str] = None
 
     # ------------------------
     # lifecycle
@@ -217,6 +219,25 @@ class ExecutionMonitor:
 
         if not event.get("symbol"):
             return
+
+        oid = event.get("order_id")
+        ems = event.get("event_time_ms")
+        ts = event.get("timestamp")
+        if oid not in (None, ""):
+            incoming_execution_id = f"ord:{oid}"
+        elif ems is not None:
+            incoming_execution_id = f"evt:{ems}"
+        elif ts is not None:
+            incoming_execution_id = f"ts:{ts}"
+        else:
+            incoming_execution_id = None
+        if incoming_execution_id and incoming_execution_id != self._execution_id:
+            self.reset()
+            self._execution_id = str(incoming_execution_id)
+        elif self._execution_id is None:
+            # Fallback id for events without stable identifiers.
+            self._execution_seq += 1
+            self._execution_id = f"seq:{self._execution_seq}"
 
         # 🔥 luôn tạo trace mới cho mỗi execution
         raw_fee = event.get("fee")
@@ -317,6 +338,11 @@ class ExecutionMonitor:
             _ensure_execution_history_schema(mode)
             record_execution(data, mode=mode)
 
+    def reset(self):
+        # Observability-only reset; does not touch execution engine state.
+        self.active.clear()
+        self.last_trace = None
+
     
     def handle_trade(self, data: dict):
 
@@ -402,7 +428,29 @@ class ExecutionMonitor:
             "status": status,
             "step": step,
             "order_id": t.order_id,
+            "execution_id": self._execution_id,
         }
+        last_order = {
+            "symbol": t.symbol,
+            "side": t.side,
+            "size": t.size,
+            "price": t.fill_price if t.fill_price is not None else order_price,
+            "time": ts_sec,
+            "event_time_ms": event_time_ms,
+            "status": status,
+        }
+        out["last_order"] = last_order
+        # Backward-compatible aliases for API/UI fallback mapping only.
+        out["last_fill"] = last_order
+        out["last_execution"] = last_order
+        state = "ACTIVE"
+        if t.fill_price is not None:
+            state = "ORDER FILLED"
+        elif signal_price is not None:
+            state = "SIGNAL"
+        print("[EXECUTION SNAPSHOT]")
+        print("execution_id:", self._execution_id)
+        print("state:", state)
         if event_time_ms is not None:
             out["event_time_ms"] = event_time_ms
         if ts_sec is not None:
