@@ -38,6 +38,7 @@ class TradeJournal:
         self._open_fill_window_sec = 2.5
         self._pending_restore_trade = None
         self._exchange_position_resolver = None
+        self._suppress_next_position_close_notify = False
 
         self._init_db()
         self._restore_current_trade()
@@ -298,6 +299,7 @@ class TradeJournal:
                     if self._opposite_leg_dust_vs_incoming_fill(
                         current_size, incoming_size
                     ):
+                        self._suppress_next_position_close_notify = True
                         self._apply_close_if_open(
                             price=price,
                             size=current_size,
@@ -305,6 +307,18 @@ class TradeJournal:
                         )
                         self.current_trade = None
                         self._clear_current_trade()
+                        try:
+                            from backend.notifications.trading_notifications import (
+                                notify_position_reverse,
+                            )
+
+                            notify_position_reverse(
+                                str(data.get("symbol") or ""),
+                                str(side or ""),
+                                str(self.mode),
+                            )
+                        except Exception:
+                            pass
                         self.on_position_open(
                             symbol=data.get("symbol"),
                             side=side,
@@ -312,11 +326,13 @@ class TradeJournal:
                             size=incoming_size,
                             fee=fee,
                             strategy=data.get("strategy"),
+                            notify=False,
                         )
                         self._seed_open_fill_ctx(data.get("symbol"), data)
                         return
 
                     # close current
+                    self._suppress_next_position_close_notify = True
                     self._apply_close_if_open(
                         price=price,
                         size=current_size,
@@ -330,6 +346,19 @@ class TradeJournal:
                     # open remaining
                     remaining = round(incoming_size - current_size, rd)
 
+                    try:
+                        from backend.notifications.trading_notifications import (
+                            notify_position_reverse,
+                        )
+
+                        notify_position_reverse(
+                            str(data.get("symbol") or ""),
+                            str(side or ""),
+                            str(self.mode),
+                        )
+                    except Exception:
+                        pass
+
                     self.on_position_open(
                         symbol=data.get("symbol"),
                         side=side,
@@ -337,6 +366,7 @@ class TradeJournal:
                         size=remaining,
                         fee=fee,
                         strategy=data.get("strategy"),
+                        notify=False,
                     )
                     self._seed_open_fill_ctx(data.get("symbol"), data)
 
@@ -486,7 +516,7 @@ class TradeJournal:
 
         self.conn.commit()
 
-    def on_position_open(self, symbol, side, price, size, fee=0, strategy=None):
+    def on_position_open(self, symbol, side, price, size, fee=0, strategy=None, *, notify=True):
 
         if price == 0:
             print("⚠ IGNORE INVALID OPEN (price=0)")
@@ -509,6 +539,18 @@ class TradeJournal:
             "fees": fee,
         }
         self._persist_current_trade()
+
+        if notify:
+            try:
+                from backend.notifications.trading_notifications import notify_position_open
+
+                notify_position_open(
+                    str(symbol or ""),
+                    str(side or ""),
+                    str(self.mode),
+                )
+            except Exception:
+                pass
 
     def on_position_close(self, price, size, fee=0):
 
@@ -604,6 +646,18 @@ class TradeJournal:
         if remaining_size <= 1e-5:
             self.current_trade = None
             self._clear_current_trade()
+            suppress = self._suppress_next_position_close_notify
+            if suppress:
+                self._suppress_next_position_close_notify = False
+            else:
+                try:
+                    from backend.notifications.trading_notifications import (
+                        notify_position_close,
+                    )
+
+                    notify_position_close(sym, str(self.mode))
+                except Exception:
+                    pass
         else:
             self.current_trade["entry_size"] = remaining_size
             self.current_trade["fees"] = remaining_entry_fee

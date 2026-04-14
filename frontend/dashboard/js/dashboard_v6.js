@@ -1682,8 +1682,11 @@ function updateAlerts(data){
         alerts = ["No alerts"];
     }
 
-    document.getElementById("alerts").innerHTML =
-        alerts.join("<br>");
+    const host =
+        document.getElementById("alert-heuristics-host") ||
+        document.getElementById("alerts");
+    if (!host) return;
+    host.innerHTML = alerts.join("<br>");
 
 }
 

@@ -4,9 +4,11 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>BOT PRO LIVE — Trading Desk V8</title>
-<link rel="stylesheet" href="/dashboard/css/dashboard_v8.css?v=8">
+<link rel="stylesheet" href="/dashboard/css/dashboard_v8.css?v=9">
+<link rel="stylesheet" href="/dashboard/css/alert_panel.css?v=1">
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-<script src="/dashboard/js/dashboard_v8.js?v=8" defer></script>
+<script src="/dashboard/js/dashboard_v8.js?v=9" defer></script>
+<script src="/dashboard/js/alert_panel.js?v=1" defer></script>
 </head>
 <body class="v8-body">
 
@@ -301,7 +303,13 @@
       <aside class="v8-obs-alerts-rail">
         <article class="v8-card v8-card-alerts-compact" id="v8-panel-alerts" data-v8-modes="live,shadow">
           <div class="v8-card-head"><h2>ALERTS</h2></div>
-          <div id="alerts" class="v8-card-body v8-alerts-body"></div>
+          <div id="alerts" class="v8-card-body v8-alerts-body">
+            <div id="alert-panel">
+              <div class="alert-header">System Alerts</div>
+              <div id="alert-list"></div>
+            </div>
+            <div id="alert-heuristics-host"></div>
+          </div>
         </article>
       </aside>
     </div>

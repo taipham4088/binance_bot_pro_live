@@ -12,6 +12,10 @@ class PnLEngine:
     - floating pnl
     - equity
     - drawdown
+
+    Position OPEN/CLOSE/REVERSE notifications are emitted from TradeJournal
+    (see backend.notifications.trading_notifications); PnLEngine has no discrete
+    position lifecycle hooks.
     """
 
     def __init__(self, db_path=None, session=None, start_balance=10000):

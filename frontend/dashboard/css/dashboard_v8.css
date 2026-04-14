@@ -1471,3 +1471,27 @@ body.v8-backtest-mode #v8-panel-performance {
   font-size: 12px;
   padding: 20px 12px !important;
 }
+
+/* Session STOPPED: PnL + risk panels frozen (no realtime numeric churn) */
+article.v8-card.v8-pnl-risk-frozen,
+article#v8-panel-pnl.v8-pnl-risk-frozen,
+article#v8-panel-risk.v8-pnl-risk-frozen {
+  position: relative;
+  outline: 1px solid rgba(148, 163, 184, 0.25);
+  outline-offset: -1px;
+}
+
+article.v8-card.v8-pnl-risk-frozen::after,
+article#v8-panel-pnl.v8-pnl-risk-frozen::after,
+article#v8-panel-risk.v8-pnl-risk-frozen::after {
+  content: "Frozen";
+  position: absolute;
+  top: 8px;
+  right: 10px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--v8-muted);
+  pointer-events: none;
+}

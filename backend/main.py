@@ -14,6 +14,10 @@ from backend.api.routes_risk import router as risk_router
 
 from backend.ws.intent_ws import router as intent_ws_router
 from backend.ws.state_ws import router as state_ws_router
+from backend.ws.alert_ws import router as alert_ws_router
+from backend.ws.alert_ws import start_alert_broadcast_task
+from backend.notifications.notification_api import router as notification_api_router
+from backend.notifications.notification_router import start_notification_router
 
 from backend.core.state_hub import StateHub
 from backend.core.run_manager import RunManager
@@ -89,6 +93,7 @@ app.include_router(debug_router, prefix="/api/debug")
 # =========================
 app.include_router(intent_ws_router)
 app.include_router(state_ws_router)
+app.include_router(alert_ws_router)
 
 
 @app.get("/")
@@ -105,6 +110,8 @@ async def startup():
     )
 
     await alert_engine_instance.start()
+    start_notification_router()
+    start_alert_broadcast_task()
 
 app.mount(
     "/dashboard",

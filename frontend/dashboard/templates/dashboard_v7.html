@@ -7,6 +7,7 @@
 <title>BOT PRO LIVE</title>
 
 <link rel="stylesheet" href="/dashboard/css/dashboard_v6.css?v=11">
+<link rel="stylesheet" href="/dashboard/css/alert_panel.css?v=1">
 
 <link href="https://cdn.jsdelivr.net/npm/gridstack@8.4.0/dist/gridstack.min.css" rel="stylesheet"/>
 
@@ -14,6 +15,7 @@
 <script src="https://cdn.jsdelivr.net/npm/gridstack@8.4.0/dist/gridstack-all.js"></script>
 
 <script src="/dashboard/js/dashboard_v6.js?v=21" defer></script>
+<script src="/dashboard/js/alert_panel.js?v=1" defer></script>
 
 </head>
 
@@ -377,7 +379,13 @@ oninput="pendingButton('initial_balance')"
 <h2>ALERTS</h2>
 <div class="panel-menu" onclick="togglePanel('alerts')">⋮</div>
 </div>
-<div id="alerts"></div>
+<div id="alerts">
+<div id="alert-panel">
+<div class="alert-header">System Alerts</div>
+<div id="alert-list"></div>
+</div>
+<div id="alert-heuristics-host"></div>
+</div>
 </div>
 </div>
 </div>

@@ -35,6 +35,11 @@ const sessionRuntimeStatus = {
   backtest: "STOPPED",
 }
 
+/** When true, skip realtime PnL/risk DOM updates (session STOPPED); cleared when RUNNING. */
+let v8PnlRiskRealtimeFrozen = false
+/** One-shot: allow a single PnL/risk paint after explicit refresh (bootstrap, tab change, lifecycle). */
+let v8BypassPnlRiskFreezeOnce = false
+
 /** From `/api/system/sessions` (mode + status); used so Control Panel matches Session modal. */
 const sessionsRuntime = {
   live: { running: false },
@@ -254,6 +259,15 @@ function formatCurrency(val) {
 
 function formatNumber(val) {
   return formatCurrency(val)
+}
+
+function formatPositionSize(size) {
+  const n = Number(size) || 0
+  const abs = Math.abs(n)
+  if (!abs) return "0.000"
+  if (abs < 0.01) return n.toFixed(4)
+  if (abs < 1) return n.toFixed(3)
+  return n.toFixed(2)
 }
 
 /** RAM use as percent for display (expects 0–100 style value). */
@@ -613,6 +627,48 @@ function updateHeaderRunning() {
   else if (st === "FINISHED") el.classList.add("finished")
   else if (st === "ERROR") el.classList.add("error")
   else el.classList.add("stopped")
+}
+
+function freezePnlPanel() {
+  document.getElementById("v8-panel-pnl")?.classList.add("v8-pnl-risk-frozen")
+}
+
+function freezeRiskPanel() {
+  document.getElementById("v8-panel-risk")?.classList.add("v8-pnl-risk-frozen")
+}
+
+function unfreezePnlPanel() {
+  document.getElementById("v8-panel-pnl")?.classList.remove("v8-pnl-risk-frozen")
+}
+
+function unfreezeRiskPanel() {
+  document.getElementById("v8-panel-risk")?.classList.remove("v8-pnl-risk-frozen")
+}
+
+function stopRealtimePolling() {
+  v8PnlRiskRealtimeFrozen = true
+}
+
+function startRealtimePolling() {
+  v8PnlRiskRealtimeFrozen = false
+}
+
+function applyV8StoppedSessionRealtimePolicy() {
+  const session = { status: sessionRuntimeStatus[selectedDashboardSession] || "STOPPED" }
+  console.log("[V8 DEBUG] freeze policy", {
+    selectedDashboardSession,
+    sessionStatus: session.status,
+    willFreezePnlRisk: session.status === "STOPPED",
+  })
+  if (session.status === "STOPPED") {
+    freezePnlPanel()
+    freezeRiskPanel()
+    stopRealtimePolling()
+  } else {
+    unfreezePnlPanel()
+    unfreezeRiskPanel()
+    startRealtimePolling()
+  }
 }
 
 function syncMarketHeaderFromConfig(cfg) {
@@ -1004,7 +1060,9 @@ async function startSession(sessionId) {
 }
 
 async function stopSession(sessionId) {
-  return postSessionControl(`/api/system/session/stop/${encodeURIComponent(sessionId)}`)
+  const path = `/api/system/session/stop/${encodeURIComponent(sessionId)}`
+  console.log("STOP SESSION", sessionId, "POST", path)
+  return postSessionControl(path)
 }
 
 async function exportCandle(session) {
@@ -1394,6 +1452,7 @@ async function refreshAllPanels(bypassBacktestHardResetGuard = false) {
   ) {
     return
   }
+  v8BypassPnlRiskFreezeOnce = true
   await loadDashboard()
   if (v8TradesHistoryPollActive()) await updateTrades(true)
   if (v8ExecHistoryPollActive()) await updateExecutionHistory()
@@ -1624,6 +1683,16 @@ async function refreshSessionStatuses() {
   }
   updateHeaderRunning()
   syncSessionRunningState()
+  applyV8StoppedSessionRealtimePolicy()
+  // [V8 DEBUG] Investigation: session status source = GET /api/system/sessions → sessionRuntimeStatus
+  const _dbgSel = String(selectedDashboardSession || "live").toLowerCase()
+  const _dbgSession = { status: sessionRuntimeStatus[_dbgSel] || "STOPPED" }
+  console.log("SESSION STATUS", _dbgSession.status, {
+    endpoint: "GET /api/system/sessions",
+    selectedDashboardSession: _dbgSel,
+    sessionRuntimeStatus: { ...sessionRuntimeStatus },
+    rawRowLive: "(see Network tab)",
+  })
 }
 
 function getSessionQueryParams() {
@@ -1657,10 +1726,14 @@ function getExecutionHistoryQueryParams() {
 }
 
 async function pollV8Metrics() {
+  console.log("POLL ACTIVE", { v8PnlRiskRealtimeFrozen })
   if (
     v8PanelHiddenById("v8-panel-metrics") &&
     v8PanelHiddenById("v8-panel-performance")
   ) {
+    return
+  }
+  if (v8PnlRiskRealtimeFrozen) {
     return
   }
   if (v8SkipIfBacktestHardReset("pollV8Metrics")) {
@@ -2014,6 +2087,7 @@ async function onSessionSelectionChanged() {
     await loadSessionConfig()
     applyDashboardModeVisibility(selectedDashboardSession)
     // Full repaint lifecycle (same idea as bootstrap): always refetch dashboard + metrics for the new session.
+    v8BypassPnlRiskFreezeOnce = true
     await loadDashboard()
     if (v8TradeScopedMode(sid) && useSessionMetrics) {
       resetV8Metrics()
@@ -2109,6 +2183,7 @@ document.addEventListener("DOMContentLoaded", function(){
     // Hydration can change selectedDashboardSession; mode visibility was applied earlier with defaults.
     applyDashboardModeVisibility(selectedDashboardSession)
     await loadSymbols()
+    v8BypassPnlRiskFreezeOnce = true
     await loadDashboard()
     await new Promise(r => requestAnimationFrame(r))
     if (useSessionMetrics) {
@@ -2226,11 +2301,18 @@ function v8PaintDashboardPayload(data) {
   syncMarketHeaderFromConfig(data.config)
 
   updatePosition(data)
-  updatePnL(data)
+  let bypassPnlRiskFreeze = false
+  if (v8BypassPnlRiskFreezeOnce) {
+    v8BypassPnlRiskFreezeOnce = false
+    bypassPnlRiskFreeze = true
+  }
+  if (!v8PnlRiskRealtimeFrozen || bypassPnlRiskFreeze) {
+    updatePnL(data)
+    updateRisk(data)
+  }
 
   updateSystem(data)
   updateExecution(data)
-  updateRisk(data)
   updateReconciliation(data)
 
   updateStrategy(data)
@@ -2666,6 +2748,7 @@ div.remove()
 function initWebSocket(){
 
 const session_id = "live_shadow"
+console.log("WS SESSION", session_id, "(hardcoded; compare to selectedDashboardSession / session select)")
 
 const ws = new WebSocket(
 `ws://127.0.0.1:8000/ws/state/${session_id}`
@@ -2778,7 +2861,7 @@ function updatePosition(data) {
 
   el.innerHTML = `
         <div class="v8-kv"><span class="k">Side</span><span class="v ${cls}">${side}</span></div>
-        <div class="v8-kv"><span class="k">Size</span><span class="v mono">${pnlFmtNum(p.size)}</span></div>
+        <div class="v8-kv"><span class="k">Size</span><span class="v mono">${formatPositionSize(p.size)}</span></div>
         <div class="v8-kv"><span class="k">Entry Price</span><span class="v mono">${entry}</span></div>
     `
 }
@@ -4305,7 +4388,9 @@ function updateLatency(data) {
 
 function updateAlerts(data) {
   if (v8PanelHiddenById("v8-panel-alerts")) return
-  const el = document.getElementById("alerts")
+  const el =
+    document.getElementById("alert-heuristics-host") ||
+    document.getElementById("alerts")
   if (!el) return
   const alerts = []
   const exec = data?.observability?.execution_monitor
@@ -4388,6 +4473,7 @@ select.value = firstVisible.value
 
 function initMarketWS(){
 
+console.log("WS SESSION", "live_shadow", "(initMarketWS header ticker; hardcoded URL)")
 const ws = new WebSocket("ws://127.0.0.1:8000/ws/state/live_shadow")
 
 ws.onmessage = (event)=>{
@@ -4681,6 +4767,7 @@ async function clearV8TradeHistoryView() {
     resetBacktestPanels()
     delete dashboardSessionCache["backtest"]
   }
+  v8BypassPnlRiskFreezeOnce = true
   await loadDashboard()
   await pollV8Metrics()
 }
@@ -4689,6 +4776,7 @@ async function clearV8TradeHistoryView() {
 function resetSessionMetrics() {
   useSessionMetrics = false
   localStorage.removeItem(V8_SESSION_METRICS_KEY)
+  v8BypassPnlRiskFreezeOnce = true
   void loadDashboard()
 }
 
@@ -4833,7 +4921,7 @@ if(pos.side === "SHORT") state = "SHORT OPENED"
 el.innerHTML = `
 State: ${state}<br>
 Side: ${pos.side}<br>
-Size: ${pos.size}
+Size: ${formatPositionSize(pos?.size)}
 `
 }
 

@@ -3,6 +3,10 @@ import asyncio
 import websockets
 import time
 from backend.runtime.exchange_config import exchange_config
+from backend.observability.health_metrics import (
+    record_ws_disconnect,
+    record_ws_reconnect,
+)
 
 
 class BinanceWSClient:
@@ -26,20 +30,41 @@ class BinanceWSClient:
         self.running = True
 
         while self.running:
+            disconnect_notified = False
+
+            def _notify_disconnect() -> None:
+                nonlocal disconnect_notified
+                if disconnect_notified:
+                    return
+                disconnect_notified = True
+                try:
+                    record_ws_disconnect("binance_ws")
+                except Exception:
+                    pass
+
             try:
+                prior_attempts = self.reconnect_attempt
                 async with websockets.connect(
                     self.ws_url,
                     ping_interval=20,
                     ping_timeout=20,
                     close_timeout=5
                 ) as ws:
-  
+
                     print("[BINANCE WS] connected")
-   
+
                     self.reconnect_attempt = 0
+                    if prior_attempts > 0:
+                        try:
+                            record_ws_reconnect("binance_ws")
+                        except Exception:
+                            pass
+
                     await self._listen(ws)
 
             except Exception as e:
+
+                _notify_disconnect()
 
                 self.reconnect_attempt += 1
                 wait = min(30, 2 ** self.reconnect_attempt)
@@ -48,6 +73,10 @@ class BinanceWSClient:
                 print(f"[BINANCE WS] reconnect in {wait}s")
 
                 await asyncio.sleep(wait)
+
+            else:
+                if self.running:
+                    _notify_disconnect()
 
     async def _listen(self, ws):
 

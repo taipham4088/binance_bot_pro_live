@@ -5,6 +5,8 @@ from collections import deque
 from dataclasses import dataclass
 from typing import Dict, Optional
 
+from backend.alerts.alert_manager import alert_manager
+from backend.alerts.alert_types import Alert, AlertLevel, AlertSource
 from backend.analytics.session_publish_context import resolve_session_id_from_call_stack
 from backend.observability.execution_recorder import init_db, record_execution
 from backend.storage.mode_storage import mode_storage
@@ -13,6 +15,9 @@ _ensure_execution_db_lock = threading.Lock()
 _initialized_execution_db_paths: set[str] = set()
 
 _logger = logging.getLogger(__name__)
+
+_HIGH_LATENCY_MS = 8000.0
+_HIGH_LATENCY_COOLDOWN_SEC = 60.0
 
 
 def _ensure_execution_history_schema(mode: str) -> None:
@@ -114,6 +119,11 @@ class ExecutionTrace:
 
 
 class ExecutionMonitor:
+    """
+    Execution traces and latency observability. Position OPEN/CLOSE/REVERSE
+    trading notifications are emitted from TradeJournal only (avoid duplicate
+    bus delivery vs analytics handle_event).
+    """
 
     def __init__(self):
         # print("🔥 EXECUTION MONITOR INIT:", id(self))
@@ -121,6 +131,7 @@ class ExecutionMonitor:
         self.active: Dict[str, ExecutionTrace] = {}
         self.last_trace: Optional[ExecutionTrace] = None
         self.history = deque(maxlen=20)
+        self._last_high_latency_alert_ts: float = 0.0
 
     # ------------------------
     # lifecycle
@@ -274,6 +285,26 @@ class ExecutionMonitor:
         self.last_trace = trace
 
         data = self.snapshot()
+
+        if data:
+            lat = data.get("total_latency_ms")
+            if lat is not None and float(lat) >= _HIGH_LATENCY_MS:
+                now = time.time()
+                if now - self._last_high_latency_alert_ts >= _HIGH_LATENCY_COOLDOWN_SEC:
+                    self._last_high_latency_alert_ts = now
+                    mode = resolve_session_id_from_call_stack()
+                    try:
+                        alert_manager.create_alert(
+                            Alert(
+                                level=AlertLevel.WARNING,
+                                source=AlertSource.MONITORING,
+                                message=f"High latency total_latency_ms={float(lat):.1f}",
+                                symbol=trace.symbol,
+                                session=mode,
+                            )
+                        )
+                    except Exception:
+                        pass
 
         if data and data.get("fill_price") is not None:
             self.history.append(data)

@@ -584,6 +584,14 @@ class DashboardCache:
 
         manager = getattr(self.app_state, "manager", None) if self.app_state else None
         primary = self._pick_primary_session(manager) if manager else None
+        print(
+            "[DEBUG] dashboard refresh",
+            {
+                "primary_id": getattr(primary, "id", None) if primary else None,
+                "primary_status": getattr(primary, "status", None) if primary else None,
+                "n_sessions": len(manager.sessions) if manager and getattr(manager, "sessions", None) else 0,
+            },
+        )
 
         position = (
             self._get_position_for_session(primary)

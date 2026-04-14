@@ -220,6 +220,7 @@ async def stop_session(request: Request, session_id: str):
                 print("[EXECUTION] engine stop error:", e)
 
         session = manager.stop_session(session_id)
+        print("[DEBUG] session status after stop", getattr(session, "status", None))
 
         # Ensure heartbeat loop is halted for true STOP state.
         try:

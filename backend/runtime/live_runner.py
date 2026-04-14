@@ -3,6 +3,10 @@ import asyncio
 import time
 import queue
 
+from backend.alerts.alert_manager import alert_manager
+from backend.alerts.alert_types import Alert, AlertLevel, AlertSource
+
+
 class LiveRunner(threading.Thread):
 
     def __init__(self, session, market):
@@ -11,14 +15,31 @@ class LiveRunner(threading.Thread):
         self.session = session
         self.market = market
         self.running = False
+        self._intentional_stop = False
         self._candle_subscriber = None
 
         # event queue
         self.queue = queue.Queue(maxsize=1000)
 
+    def _emit_system_engine_alert(self, message: str) -> None:
+        try:
+            sid = getattr(self.session, "id", None)
+            alert_manager.create_alert(
+                Alert(
+                    level=AlertLevel.INFO,
+                    source=AlertSource.SYSTEM,
+                    message=message,
+                    session=str(sid) if sid is not None else None,
+                )
+            )
+        except Exception:
+            pass
+
     def run(self):
+        self._intentional_stop = False
         self.running = True
         self.session.status = "RUNNING"
+        self._emit_system_engine_alert("Engine start")
         print("[LIVE RUNNER START]", f"runner_id={id(self)}")
         print("trade_mode =", getattr(self.session.config, "trade_mode", None))
         print("risk =", getattr(self.session.config, "risk_per_trade", None))
@@ -88,6 +109,9 @@ class LiveRunner(threading.Thread):
             if getattr(self.session, "try_apply_pending_symbol", None):
                 self.session.try_apply_pending_symbol()
 
+        if self._intentional_stop:
+            self._emit_system_engine_alert("Engine stop")
+
         sid = getattr(self.session, "id", None)
         print(
             "[LIVE RUNNER END]",
@@ -96,13 +120,14 @@ class LiveRunner(threading.Thread):
         )
 
     def stop(self):
+        self._intentional_stop = True
+        self.running = False
         print(
             "[RUNNER STOP]",
             f"runner_id={id(self)}",
             "thread_alive=",
             self.is_alive(),
         )
-        self.running = False
         market = getattr(self, "market", None)
         cb = getattr(self, "_candle_subscriber", None)
         if market is not None and cb is not None and hasattr(
